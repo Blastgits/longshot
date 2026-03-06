@@ -23,6 +23,7 @@
         <a class="hero__contribute fade-up" href="https://www.github.com/blastgits/longshot" target="_blank" rel="noopener noreferrer">
           Get paid to contribute to Longshot
         </a>
+
         <div class="hero__video-wrap fade-up">
           <iframe
             class="hero__video"
@@ -36,34 +37,38 @@
       </div>
     </section>
 
-    <!-- Section 1.5: Install (dark) -->
+    <!-- Section: Install -->
     <section class="install" aria-label="Install">
       <div class="install__inner">
-        <span class="section-label section-label--dark fade-up">Get Started</span>
+        <span class="section-label fade-up">Get Started</span>
         <p class="install__tagline fade-up">Install in seconds. Run from anywhere.</p>
-        <div class="install__cards">
-          <div class="install__card fade-up">
-            <span class="install__card-label">pipx (Recommended)</span>
+
+        <div class="install__box fade-up">
+          <input type="radio" name="install-method" id="install-pipx" checked hidden />
+          <input type="radio" name="install-method" id="install-brew" hidden />
+
+          <div class="install__toggle">
+            <label for="install-pipx" class="install__toggle-btn">pipx</label>
+            <label for="install-brew" class="install__toggle-btn">Homebrew</label>
+          </div>
+
+          <div class="install__panel install__panel--pipx">
             <div class="install__cmd">
               <code>pipx install longshot</code>
-              <span class="install__copy" title="Copy to clipboard">⿿</span>
             </div>
-            <span class="install__card-platform">Works on macOS, Linux & Windows</span>
+            <span class="install__platform">macOS · Linux · Windows</span>
           </div>
-          <div class="install__card fade-up">
-            <span class="install__card-label">Homebrew</span>
+
+          <div class="install__panel install__panel--brew">
             <div class="install__cmd">
               <code>brew tap andrewcai8/longshot</code>
-              <span class="install__copy" title="Copy to clipboard">⿿</span>
-            </div>
-            <div class="install__cmd">
               <code>brew install longshot</code>
-              <span class="install__copy" title="Copy to clipboard">⿿</span>
             </div>
-            <span class="install__card-platform">macOS only</span>
+            <span class="install__platform">macOS only</span>
           </div>
         </div>
-        <p class="install__note fade-up">Requires Python 3.12+. pipx will handle the rest.</p>
+
+        <p class="install__note fade-up">Requires Python 3.12+</p>
       </div>
     </section>
 

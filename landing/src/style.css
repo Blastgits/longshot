@@ -178,111 +178,116 @@ video {
 
 
 /* =========================================================
-   Section 1.5 — Install (dark)
+   Install Section (dark, below hero)
    ========================================================= */
 
 .install {
   background-color: var(--bg-dark);
-  padding: clamp(3rem, 8vh, 6rem) 2rem;
+  padding: 0 2rem clamp(4rem, 8vh, 7rem);
+  text-align: center;
 }
 
 .install__inner {
   max-width: var(--content-max);
   margin: 0 auto;
-  text-align: center;
 }
 
-.install .section-label--dark {
-  color: var(--muted-light);
+.install .section-label {
+  color: #fff;
 }
 
 .install__tagline {
   font-family: var(--font-mono);
-  font-size: clamp(0.85rem, 1.2vw, 1.05rem);
+  font-size: clamp(0.85rem, 1.1vw, 1rem);
   font-weight: 300;
-  color: rgba(255, 255, 255, 0.85);
-  letter-spacing: 0.01em;
+  color: #fff;
   margin-bottom: clamp(2rem, 4vh, 3rem);
 }
 
-.install__cards {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 1.5rem;
-  max-width: 720px;
-  margin: 0 auto clamp(2rem, 4vh, 3rem);
+/* --- Toggle Box --- */
+
+.install__box {
+  max-width: 480px;
+  margin: 0 auto clamp(1.5rem, 3vh, 2rem);
+  padding: 1rem 0 0;
 }
 
-.install__card {
-  background-color: rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 4px;
-  padding: 1.5rem;
-  text-align: left;
+/* --- Toggle Buttons --- */
+
+.install__toggle {
+  display: inline-flex;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 100px;
+  padding: 3px;
+  margin-bottom: 1.4rem;
 }
 
-.install__card-label {
-  display: block;
+.install__toggle-btn {
   font-family: var(--font-mono);
-  font-size: 0.7rem;
-  font-weight: 500;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  color: rgba(255, 255, 255, 0.5);
-  margin-bottom: 0.75rem;
+  font-size: 0.72rem;
+  font-weight: 400;
+  letter-spacing: 0.04em;
+  color: rgba(255, 255, 255, 0.6);
+  padding: 0.4em 1.2em;
+  border-radius: 100px;
+  cursor: pointer;
+  transition: color 0.25s var(--ease-out), background 0.25s var(--ease-out);
+  user-select: none;
 }
+
+/* Active toggle state via sibling radio */
+#install-pipx:checked ~ .install__toggle label[for="install-pipx"],
+#install-brew:checked ~ .install__toggle label[for="install-brew"] {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* --- Panels (show/hide via radio) --- */
+
+.install__panel {
+  display: none;
+}
+
+#install-pipx:checked ~ .install__panel--pipx,
+#install-brew:checked ~ .install__panel--brew {
+  display: block;
+}
+
+/* --- Command blocks --- */
 
 .install__cmd {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  background-color: #111;
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 3px;
-  padding: 0.65em 0.9em;
-  margin-bottom: 0.5rem;
-}
-
-.install__cmd:last-of-type {
-  margin-bottom: 0.75rem;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-bottom: 0.6rem;
 }
 
 .install__cmd code {
   font-family: var(--font-mono);
-  font-size: clamp(0.75rem, 1vw, 0.85rem);
+  font-size: clamp(0.82rem, 1vw, 0.92rem);
   font-weight: 400;
-  color: rgba(255, 255, 255, 0.9);
-  background: none;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  padding: 0.55em 1em;
+  letter-spacing: 0.01em;
 }
 
-.install__copy {
-  font-size: 0.85rem;
-  color: rgba(255, 255, 255, 0.25);
-  cursor: pointer;
-  transition: color 0.2s var(--ease-out);
-}
-
-.install__copy:hover {
-  color: rgba(255, 255, 255, 0.5);
-}
-
-.install__card-platform {
-  display: block;
+.install__platform {
   font-family: var(--font-mono);
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   font-weight: 300;
-  color: rgba(255, 255, 255, 0.4);
-  margin-top: 0.25rem;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.02em;
 }
 
 .install__note {
   font-family: var(--font-mono);
-  font-size: 0.75rem;
+  font-size: 0.7rem;
   font-weight: 300;
-  color: rgba(255, 255, 255, 0.4);
-  letter-spacing: 0.01em;
+  color: rgba(255, 255, 255, 0.7);
+  letter-spacing: 0.02em;
 }
-
 /* =========================================================
    Hero — Contribute CTA
    ========================================================= */
@@ -322,8 +327,4 @@ video {
     letter-spacing: -0.01em;
   }
 
-  .install__cards {
-    grid-template-columns: 1fr;
-    max-width: 400px;
-  }
 }
