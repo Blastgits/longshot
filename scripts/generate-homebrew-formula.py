@@ -6,11 +6,10 @@ from pathlib import Path
 
 
 class FormulaArgs(argparse.Namespace):
-    version: str = ""
-    sha256: str = ""
-    repo: str = ""
-    output: str = ""
-
+    version: str
+    sha256: str
+    repo: str
+    output: str
 
 def parse_args() -> FormulaArgs:
     parser = argparse.ArgumentParser(description="Generate Homebrew formula for longshot")
