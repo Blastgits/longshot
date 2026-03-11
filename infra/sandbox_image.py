@@ -116,7 +116,7 @@ def create_worker_image() -> modal.Image:
         .add_local_dir(str(sandbox_dist), "/agent/packages/sandbox/dist", copy=True)
         .add_local_file(str(sandbox_pkg), "/agent/packages/sandbox/package.json", copy=True)
         # Install Pi coding agent SDK globally
-        .run_commands("npm install -g @mariozechner/pi-coding-agent@0.52.12")
+        .run_commands("npm install -g @mariozechner/pi-coding-agent@0.55.3")
         # Link @longshot/core so sandbox can resolve it
         # (both packages are pre-built JS with zero runtime deps — no npm install needed)
         .run_commands(

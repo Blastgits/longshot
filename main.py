@@ -66,6 +66,7 @@ debug_mode = False
 RUNTIME_REPO_DEFAULT = "andrewcai8/longshot"
 RUNTIME_ENV_VAR = "LONGSHOT_RUNTIME_URL"
 PROMPTS_ROOT_ENV_VAR = "LONGSHOT_PROMPTS_ROOT"
+PI_CODING_AGENT_VERSION = "^0.55.3"
 
 
 def _runtime_cache_root() -> Path:
@@ -117,7 +118,7 @@ def _write_runtime_package_json(runtime_root: Path) -> None:
         "type": "module",
         "dependencies": {
             "@longshot/core": "file:./packages/core",
-            "@mariozechner/pi-coding-agent": "^0.52.0",
+            "@mariozechner/pi-coding-agent": PI_CODING_AGENT_VERSION,
             "dotenv": "^17.3.1",
         },
     }
