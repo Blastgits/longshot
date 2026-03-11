@@ -124,6 +124,13 @@ export class LLMClient {
       throw new Error("LLMClient requires at least one endpoint");
     }
 
+    const invalidEndpoint = this.config.endpoints.find(
+      (endpoint) => !Number.isFinite(endpoint.weight) || endpoint.weight <= 0,
+    );
+    if (invalidEndpoint) {
+      throw new Error(`LLM endpoint "${invalidEndpoint.name}" must have a positive weight`);
+    }
+
     this.states = this.config.endpoints.map((ep) => ({
       config: ep,
       effectiveWeight: ep.weight,
@@ -216,40 +223,52 @@ export class LLMClient {
 
     const healthy = this.states.filter((s) => s.healthy);
     const unhealthy = this.states.filter((s) => !s.healthy);
+    const orderedHealthy = this.weightedSort(healthy);
+    const ordered = [...orderedHealthy, ...unhealthy];
 
     logger.debug("Endpoint selection", {
       healthy: healthy.map((s) => s.config.name),
       unhealthy: unhealthy.map((s) => s.config.name),
-      order: [...this.weightedSort(healthy), ...unhealthy].map((s) => ({
+      order: ordered.map((s) => ({
         name: s.config.name,
         weight: Math.round(s.effectiveWeight * 10) / 10,
         latency: Math.round(s.avgLatencyMs),
       })),
     });
 
-    return [...this.weightedSort(healthy), ...unhealthy];
+    return ordered;
   }
 
   private weightedSort(states: EndpointState[]): EndpointState[] {
     if (states.length <= 1) return [...states];
 
-    if (states.every((s) => s.effectiveWeight === 0)) return [...states];
+    if (states.every((s) => s.effectiveWeight <= 0)) return [...states];
 
     const result: EndpointState[] = [];
     const remaining = [...states];
 
     while (remaining.length > 0) {
-      const remainingWeight = remaining.reduce((sum, s) => sum + s.effectiveWeight, 0);
+      const remainingWeight = remaining.reduce((sum, s) => sum + Math.max(s.effectiveWeight, 0), 0);
+      if (remainingWeight <= 0) {
+        result.push(...remaining);
+        break;
+      }
+
       let pick = Math.random() * remainingWeight;
 
-      let selectedIdx = 0;
+      let selectedIdx = remaining.length - 1;
       for (let i = 0; i < remaining.length; i++) {
         const candidate = remaining[i];
         if (!candidate) {
           continue;
         }
 
-        pick -= candidate.effectiveWeight;
+        const candidateWeight = Math.max(candidate.effectiveWeight, 0);
+        if (candidateWeight === 0) {
+          continue;
+        }
+
+        pick -= candidateWeight;
         if (pick <= 0) {
           selectedIdx = i;
           break;

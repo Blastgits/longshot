@@ -41,7 +41,9 @@ function isEndpointEnvConfig(value: unknown): value is EndpointEnvConfig {
     !("weight" in value) ||
     typeof value.name !== "string" ||
     typeof value.endpoint !== "string" ||
-    typeof value.weight !== "number"
+    typeof value.weight !== "number" ||
+    !Number.isFinite(value.weight) ||
+    value.weight <= 0
   ) {
     return false;
   }
@@ -127,7 +129,9 @@ function parseEndpoints(): LLMEndpoint[] {
 
     for (const ep of parsedRaw) {
       if (!isEndpointEnvConfig(ep)) {
-        throw new Error("Each LLM_ENDPOINTS item must contain name, endpoint, and numeric weight");
+        throw new Error(
+          "Each LLM_ENDPOINTS item must contain name, endpoint, and positive numeric weight",
+        );
       }
 
       endpoints.push({

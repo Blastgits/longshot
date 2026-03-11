@@ -164,6 +164,19 @@ describe("config", () => {
     });
   });
 
+  it("throws when LLM_ENDPOINTS contains a non-positive weight", () => {
+    const endpoints = JSON.stringify([
+      { name: "primary", endpoint: "https://primary.example.com", weight: 0 },
+    ]);
+
+    withEnv({ GIT_REPO_URL: REQUIRED_ENV.GIT_REPO_URL, LLM_ENDPOINTS: endpoints }, () => {
+      assert.throws(
+        () => loadConfig(),
+        (err: Error) => err.message.includes("positive numeric weight"),
+      );
+    });
+  });
+
   it("LLM_ENDPOINTS takes priority over LLM_BASE_URL", () => {
     const endpoints = JSON.stringify([
       { name: "primary", endpoint: "https://primary.example.com", weight: 100 },

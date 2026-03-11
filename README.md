@@ -166,6 +166,8 @@ For multiple LLM endpoints with load balancing, use `LLM_ENDPOINTS` instead of `
 LLM_ENDPOINTS=[{"name":"primary","endpoint":"https://...","apiKey":"sk-...","weight":100}]
 ```
 
+Each `weight` must be a positive number. `LLM_MODEL`, `LLM_MAX_TOKENS`, and `LLM_TEMPERATURE` remain global settings shared by all endpoints.
+
 ### Workers
 
 | Variable | Default | Description |

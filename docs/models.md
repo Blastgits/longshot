@@ -80,16 +80,22 @@ Model capability directly affects output quality. More capable models write bett
 
 ## Load Balancing Across Providers
 
-For high-throughput use, you can distribute requests across multiple endpoints using `LLM_ENDPOINTS`. Set it to a JSON array of endpoint configs:
+For high-throughput use, you can distribute requests across multiple endpoints using `LLM_ENDPOINTS`. Set it to a JSON array of weighted endpoint configs:
 
 ```bash
 LLM_ENDPOINTS='[
-  {"baseUrl": "https://api.openai.com/v1", "apiKey": "sk-...", "model": "gpt-4o"},
-  {"baseUrl": "https://openrouter.ai/api/v1", "apiKey": "sk-or-...", "model": "openai/gpt-4o"},
-  {"baseUrl": "http://localhost:11434/v1", "apiKey": "ollama", "model": "codestral"}
+  {"name": "openai-primary", "endpoint": "https://api.openai.com/v1", "apiKey": "sk-...", "weight": 70},
+  {"name": "openrouter-backup", "endpoint": "https://openrouter.ai/api/v1", "apiKey": "sk-or-...", "weight": 30}
 ]'
 ```
 
-When `LLM_ENDPOINTS` is set, the client round-robins across the listed endpoints. The top-level `LLM_BASE_URL`, `LLM_API_KEY`, and `LLM_MODEL` vars are ignored.
+When `LLM_ENDPOINTS` is set, the client uses weighted routing with latency-aware rebalancing and failover across the listed endpoints. The top-level `LLM_BASE_URL` and `LLM_API_KEY` vars are ignored.
 
-Each entry in the array accepts the same fields as the top-level variables: `baseUrl`, `apiKey`, `model`, `maxTokens`, `temperature`, `timeoutMs`.
+Each entry must provide:
+
+- `name`: label used in logs and endpoint stats
+- `endpoint`: OpenAI-compatible base URL
+- `apiKey`: optional per-endpoint API key
+- `weight`: positive number used as the endpoint's base routing weight
+
+The top-level `LLM_MODEL`, `LLM_MAX_TOKENS`, `LLM_TEMPERATURE`, and `LLM_TIMEOUT_MS` settings still apply globally to all configured endpoints.

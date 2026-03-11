@@ -123,4 +123,18 @@ describe("LLMClient", () => {
         err.message.includes("Invalid LLM response shape"),
     );
   });
+
+  it("rejects non-positive endpoint weights at construction time", () => {
+    assert.throws(
+      () =>
+        new LLMClient({
+          endpoints: [{ name: "bad", endpoint: "https://bad.example.com", weight: 0 }],
+          model: "test-model",
+          maxTokens: 1,
+          temperature: 0,
+          timeoutMs: 1000,
+        }),
+      (err: Error) => err.message.includes('LLM endpoint "bad" must have a positive weight'),
+    );
+  });
 });
