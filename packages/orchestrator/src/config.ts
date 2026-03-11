@@ -11,6 +11,8 @@ export interface FinalizationConfig {
 export interface OrchestratorConfig extends HarnessConfig {
   targetRepoPath: string;
   pythonPath: string;
+  stateDir: string;
+  runId: string;
   healthCheckInterval: number;
   /** Max ms to wait for LLM endpoints to become ready at startup. 0 = skip probe. */
   readinessTimeoutMs: number;
@@ -265,6 +267,8 @@ export function loadConfig(): OrchestratorConfig {
     },
     targetRepoPath: process.env.TARGET_REPO_PATH || "./target-repo",
     pythonPath: process.env.PYTHON_PATH || "python3",
+    stateDir: process.env.TASKSTORE_STATE_DIR || "./taskstore-state",
+    runId: process.env.ORCHESTRATOR_RUN_ID || `run-${Date.now()}`,
     healthCheckInterval,
     readinessTimeoutMs,
     finalization: {

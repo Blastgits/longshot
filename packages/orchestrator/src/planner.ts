@@ -22,6 +22,7 @@ import {
 } from "./shared.js";
 import { DEFAULT_SUBPLANNER_CONFIG, type Subplanner, shouldDecompose } from "./subplanner.js";
 import type { TaskQueue } from "./task-queue.js";
+import { InMemoryTaskStore, type TaskStore } from "./task-store.js";
 import type { WorkerPool } from "./worker-pool.js";
 
 const logger = createLogger("planner", "root-planner");
@@ -81,8 +82,7 @@ export class Planner {
   private pendingHandoffs: { task: Task; handoff: Handoff }[];
   private allHandoffs: Handoff[];
   private handoffsSinceLastPlan: Handoff[];
-  private activeTasks: Set<string>;
-  private dispatchedTaskIds: Set<string>;
+  private taskStore: TaskStore;
   private scopeTracker: ScopeTracker;
 
   private lastSweepResult: SweepResult | null = null;
@@ -114,6 +114,7 @@ export class Planner {
     systemPrompt: string,
     subplanner?: Subplanner,
     deps?: Partial<PlannerDeps>,
+    taskStore?: TaskStore,
   ) {
     this.config = config;
     this.plannerConfig = plannerConfig;
@@ -143,8 +144,7 @@ export class Planner {
     this.pendingHandoffs = [];
     this.allHandoffs = [];
     this.handoffsSinceLastPlan = [];
-    this.activeTasks = new Set();
-    this.dispatchedTaskIds = new Set();
+    this.taskStore = taskStore ?? new InMemoryTaskStore();
     this.scopeTracker = new ScopeTracker();
 
     this.taskCreatedCallbacks = [];
@@ -195,6 +195,14 @@ export class Planner {
       this.rootSpan.setAttribute("request", request.slice(0, 200));
     }
 
+    const staleRecovered = this.taskStore.reapStaleActive(this.config.workerTimeout * 1_000);
+    if (staleRecovered.length > 0) {
+      logger.warn("Recovered stale active task records before planner loop", {
+        recovered: staleRecovered.length,
+        taskIds: staleRecovered,
+      });
+    }
+
     let iteration = 0;
     let planningDone = false;
     let consecutiveErrors = 0;
@@ -202,7 +210,7 @@ export class Planner {
     while (this.running && iteration < this.plannerConfig.maxIterations) {
       logger.debug("Loop tick", {
         iteration,
-        activeTasks: this.activeTasks.size,
+        activeTasks: this.taskStore.getActiveCount(),
         pendingHandoffs: this.pendingHandoffs.length,
         handoffsSinceLastPlan: this.handoffsSinceLastPlan.length,
         planningDone,
@@ -212,7 +220,7 @@ export class Planner {
 
         const hasCapacity = this.dispatchLimiter.getActive() < this.config.maxWorkers;
         const hasEnoughHandoffs = this.handoffsSinceLastPlan.length >= MIN_HANDOFFS_FOR_REPLAN;
-        const noActiveWork = this.activeTasks.size === 0 && iteration > 0;
+        const noActiveWork = this.taskStore.getActiveCount() === 0 && iteration > 0;
         const needsPlan = hasCapacity && (iteration === 0 || hasEnoughHandoffs || noActiveWork);
 
         if (needsPlan && !planningDone) {
@@ -233,7 +241,7 @@ export class Planner {
 
           if (
             tasks.length === 0 &&
-            this.activeTasks.size === 0 &&
+            this.taskStore.getActiveCount() === 0 &&
             this.taskQueue.getPendingCount() === 0
           ) {
             logger.info("No more tasks to create and no active work. Planning complete.");
@@ -248,7 +256,11 @@ export class Planner {
           }
         }
 
-        if (planningDone && this.activeTasks.size === 0 && this.taskQueue.getPendingCount() === 0) {
+        if (
+          planningDone &&
+          this.taskStore.getActiveCount() === 0 &&
+          this.taskQueue.getPendingCount() === 0
+        ) {
           break;
         }
 
@@ -265,7 +277,7 @@ export class Planner {
             error: err.message,
             consecutiveErrors,
             iteration: iteration + 1,
-            activeTasks: this.activeTasks.size,
+            activeTasks: this.taskStore.getActiveCount(),
             hasPiSession: this.piSession !== null,
           },
         );
@@ -283,9 +295,9 @@ export class Planner {
       }
     }
 
-    if (this.activeTasks.size > 0) {
-      logger.info("Waiting for remaining active tasks", { count: this.activeTasks.size });
-      while (this.activeTasks.size > 0 && this.running) {
+    if (this.taskStore.getActiveCount() > 0) {
+      logger.info("Waiting for remaining active tasks", { count: this.taskStore.getActiveCount() });
+      while (this.taskStore.getActiveCount() > 0 && this.running) {
         this.collectCompletedHandoffs();
         await this.deps.sleep(LOOP_SLEEP_MS);
       }
@@ -397,7 +409,7 @@ export class Planner {
       }
 
       const tasks = allParsedTasks.filter((t) => {
-        if (this.dispatchedTaskIds.has(t.id)) {
+        if (this.taskStore.hasTask(t.id)) {
           logger.warn("Skipping duplicate task ID from LLM", { taskId: t.id });
           return false;
         }
@@ -544,9 +556,10 @@ export class Planner {
       }
     }
 
-    if (this.activeTasks.size > 0) {
-      msg += `## Currently Active Tasks (${this.activeTasks.size})\n`;
-      for (const id of this.activeTasks) {
+    const activeTaskIds = this.taskStore.getActiveTaskIds();
+    if (activeTaskIds.length > 0) {
+      msg += `## Currently Active Tasks (${activeTaskIds.length})\n`;
+      for (const id of activeTaskIds) {
         const t = this.taskQueue.getById(id);
         if (t) msg += `- ${id}: ${t.description.slice(0, 120)}\n`;
       }
@@ -598,7 +611,7 @@ export class Planner {
     logger.debug("Built follow-up planner prompt", {
       length: msg.length,
       newHandoffs: newHandoffs.length,
-      activeTasks: this.activeTasks.size,
+      activeTasks: this.taskStore.getActiveCount(),
       fileTreeDelta: newFiles.length + removedFiles.length,
     });
     return msg;
@@ -610,7 +623,7 @@ export class Planner {
 
   private dispatchTasks(tasks: Task[]): void {
     for (const task of tasks) {
-      if (this.activeTasks.has(task.id) || this.dispatchedTaskIds.has(task.id)) {
+      if (this.taskStore.hasTask(task.id)) {
         logger.warn("Skipping already-dispatched task", { taskId: task.id });
         continue;
       }
@@ -620,8 +633,7 @@ export class Planner {
         cb(task);
       }
 
-      this.dispatchedTaskIds.add(task.id);
-      this.activeTasks.add(task.id);
+      this.taskStore.markActive(task.id, task.branch, task.retryCount ?? 0);
       this.dispatchSingleTask(task);
     }
   }
@@ -647,7 +659,6 @@ export class Planner {
           status: current.status,
         });
         this.dispatchLimiter.release();
-        this.activeTasks.delete(task.id);
         dispatchSpan?.end();
         return;
       }
@@ -691,8 +702,10 @@ export class Planner {
 
         if (handoff.status === "complete") {
           this.taskQueue.completeTask(task.id);
+          this.taskStore.markStatus(task.id, "complete", task.retryCount ?? 0);
         } else {
           this.taskQueue.failTask(task.id);
+          this.taskStore.markStatus(task.id, "failed", task.retryCount ?? 0);
         }
 
         this.monitor.recordTokenUsage(handoff.metrics.tokensUsed);
@@ -705,6 +718,7 @@ export class Planner {
         dispatchSpan?.setStatus("ok");
       } catch (error) {
         this.taskQueue.failTask(task.id);
+        this.taskStore.markStatus(task.id, "failed", task.retryCount ?? 0);
         const err = error instanceof Error ? error : new Error(String(error));
         logger.error("Task dispatch failed", { taskId: task.id, error: err.message });
 
@@ -731,7 +745,6 @@ export class Planner {
       } finally {
         this.scopeTracker.release(task.id);
         this.dispatchLimiter.release();
-        this.activeTasks.delete(task.id);
         dispatchSpan?.end();
       }
     })();
@@ -739,7 +752,6 @@ export class Planner {
     promise.catch((error) => {
       const err = error instanceof Error ? error : new Error(String(error));
       logger.error("Unhandled dispatch error", { taskId: task.id, error: err.message });
-      this.activeTasks.delete(task.id);
       for (const cb of this.errorCallbacks) {
         cb(err);
       }
@@ -775,7 +787,7 @@ export class Planner {
             maxRetries: MAX_TASK_RETRIES,
             failureReason: handoff.summary.slice(0, 200),
           });
-          this.activeTasks.add(task.id);
+          this.taskStore.markActive(task.id, task.branch, task.retryCount ?? 0);
           this.dispatchSingleTask(task);
         }
       }
@@ -806,7 +818,7 @@ export class Planner {
    * without going through the LLM planning cycle.
    */
   injectTask(task: Task): void {
-    if (this.activeTasks.has(task.id) || this.dispatchedTaskIds.has(task.id)) {
+    if (this.taskStore.hasTask(task.id)) {
       logger.warn("Skipping duplicate injected task", { taskId: task.id });
       return;
     }
@@ -815,8 +827,7 @@ export class Planner {
     for (const cb of this.taskCreatedCallbacks) {
       cb(task);
     }
-    this.dispatchedTaskIds.add(task.id);
-    this.activeTasks.add(task.id);
+    this.taskStore.markActive(task.id, task.branch, task.retryCount ?? 0);
     this.dispatchSingleTask(task);
     logger.info("Injected external task", { taskId: task.id });
   }
@@ -830,18 +841,11 @@ export class Planner {
   }
 
   getActiveTaskCount(): number {
-    return this.activeTasks.size;
+    return this.taskStore.getActiveCount();
   }
 
   getAllDispatchedBranches(): string[] {
-    const branches: string[] = [];
-    for (const taskId of this.dispatchedTaskIds) {
-      const task = this.taskQueue.getById(taskId);
-      if (task?.branch) {
-        branches.push(task.branch);
-      }
-    }
-    return branches;
+    return this.taskStore.getAllBranches();
   }
 
   // ---------------------------------------------------------------------------

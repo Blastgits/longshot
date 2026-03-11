@@ -1,5 +1,6 @@
 /** @module Recursive task decomposer for breaking large tasks into worker-sized units (max depth 3) */
 
+import { join } from "node:path";
 import type { Handoff, Span, Task, Tracer } from "@longshot/core";
 import { createLogger } from "@longshot/core";
 import type { OrchestratorConfig } from "./config.js";
@@ -20,6 +21,7 @@ import {
   slugifyForBranch,
 } from "./shared.js";
 import type { TaskQueue } from "./task-queue.js";
+import { InMemoryTaskStore, JournalTaskStore, type TaskStore } from "./task-store.js";
 import type { WorkerPool } from "./worker-pool.js";
 
 const logger = createLogger("subplanner", "subplanner");
@@ -244,8 +246,29 @@ export class Subplanner {
     const pendingHandoffs: { subtask: Task; handoff: Handoff }[] = [];
     const allHandoffs: Handoff[] = [];
     let handoffsSinceLastPlan: Handoff[] = [];
-    const activeTasks = new Set<string>();
-    const dispatchedTaskIds = new Set<string>();
+    const subplannerRunId = `${this.config.runId}:subplanner:${parentTask.id}`;
+    let subtaskStore: TaskStore;
+    try {
+      subtaskStore = new JournalTaskStore({
+        stateDir: join(this.config.stateDir, "subplanner"),
+        runId: subplannerRunId,
+      });
+      const staleRecovered = subtaskStore.reapStaleActive(this.config.workerTimeout * 1_000);
+      if (staleRecovered.length > 0) {
+        logger.warn("Recovered stale subplanner active records", {
+          parentTaskId: parentTask.id,
+          recovered: staleRecovered.length,
+          taskIds: staleRecovered,
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.warn("Falling back to in-memory subtask store", {
+        parentTaskId: parentTask.id,
+        error: message,
+      });
+      subtaskStore = new InMemoryTaskStore(subplannerRunId);
+    }
     const allSubtasks: Task[] = [];
     let scratchpad = "";
     let piSession: PiSessionResult | null = null;
@@ -276,9 +299,9 @@ export class Subplanner {
         try {
           collectCompletedHandoffs(pendingHandoffs, allHandoffs, handoffsSinceLastPlan);
 
-          const hasCapacity = activeTasks.size < this.config.maxWorkers;
+          const hasCapacity = subtaskStore.getActiveCount() < this.config.maxWorkers;
           const hasEnoughHandoffs = handoffsSinceLastPlan.length >= MIN_HANDOFFS_FOR_REPLAN;
-          const noActiveWork = activeTasks.size === 0 && iteration > 0;
+          const noActiveWork = subtaskStore.getActiveCount() === 0 && iteration > 0;
           const needsPlan =
             hasCapacity && (iteration === 0 || hasEnoughHandoffs || noActiveWork) && !planningDone;
 
@@ -290,18 +313,13 @@ export class Subplanner {
             const message =
               iteration === 0
                 ? this.buildInitialMessage(parentTask, repoState, depth)
-                : this.buildFollowUpMessage(
-                    repoState,
-                    handoffsSinceLastPlan,
-                    activeTasks,
-                    dispatchedTaskIds,
-                  );
+                : this.buildFollowUpMessage(repoState, handoffsSinceLastPlan, subtaskStore);
 
             logger.info(`Subplanner planning iteration ${iteration + 1}`, {
               parentTaskId: parentTask.id,
               depth,
               handoffsSinceLastPlan: handoffsSinceLastPlan.length,
-              activeTasks: activeTasks.size,
+              activeTasks: subtaskStore.getActiveCount(),
             });
 
             await session.prompt(message);
@@ -326,7 +344,7 @@ export class Subplanner {
               iteration++;
               consecutiveErrors = 0;
 
-              if (activeTasks.size === 0) {
+              if (subtaskStore.getActiveCount() === 0) {
                 planningDone = true;
               }
             } else {
@@ -337,13 +355,18 @@ export class Subplanner {
               }
               logger.debug("Subplanner scratchpad", { scratchpad: scratchpad.slice(0, 500) });
 
-              const tasks = this.buildSubtasksFromRaw(rawTasks, parentTask, dispatchedTaskIds);
+              const tasks = this.buildSubtasksFromRaw(
+                rawTasks,
+                parentTask,
+                subtaskStore,
+                allSubtasks.length,
+              );
 
               handoffsSinceLastPlan = [];
               iteration++;
               consecutiveErrors = 0;
 
-              if (tasks.length === 0 && activeTasks.size === 0) {
+              if (tasks.length === 0 && subtaskStore.getActiveCount() === 0) {
                 if (iteration === 1) {
                   taskLogger.info(
                     "LLM returned no subtasks — task is atomic, dispatching to worker directly",
@@ -376,20 +399,19 @@ export class Subplanner {
                   parentTask,
                   depth,
                   pendingHandoffs,
-                  activeTasks,
-                  dispatchedTaskIds,
+                  subtaskStore,
                   parentSpan,
                 );
               }
             }
           }
 
-          if (planningDone && activeTasks.size === 0) {
+          if (planningDone && subtaskStore.getActiveCount() === 0) {
             break;
           }
           if (
             !planningDone &&
-            activeTasks.size === 0 &&
+            subtaskStore.getActiveCount() === 0 &&
             iteration > 0 &&
             handoffsSinceLastPlan.length === 0
           ) {
@@ -413,7 +435,7 @@ export class Subplanner {
               parentTaskId: parentTask.id,
               consecutiveErrors,
               iteration: iteration + 1,
-              activeTasks: activeTasks.size,
+              activeTasks: subtaskStore.getActiveCount(),
             },
           );
 
@@ -435,7 +457,7 @@ export class Subplanner {
 
       collectCompletedHandoffs(pendingHandoffs, allHandoffs, handoffsSinceLastPlan);
 
-      while (activeTasks.size > 0) {
+      while (subtaskStore.getActiveCount() > 0) {
         collectCompletedHandoffs(pendingHandoffs, allHandoffs, handoffsSinceLastPlan);
         await sleep(LOOP_SLEEP_MS);
       }
@@ -499,8 +521,7 @@ export class Subplanner {
   private buildFollowUpMessage(
     repoState: RepoState,
     newHandoffs: Handoff[],
-    activeTasks: Set<string>,
-    dispatchedTaskIds: Set<string>,
+    subtaskStore: TaskStore,
   ): string {
     let msg = `## Updated Repository State\n`;
     msg += `File tree:\n${repoState.fileTree.join("\n")}\n\n`;
@@ -536,9 +557,10 @@ export class Subplanner {
       }
     }
 
-    if (activeTasks.size > 0) {
-      msg += `## Currently Active Subtasks (${activeTasks.size})\n`;
-      for (const id of activeTasks) {
+    const activeTaskIds = subtaskStore.getActiveTaskIds();
+    if (activeTaskIds.length > 0) {
+      msg += `## Currently Active Subtasks (${activeTaskIds.length})\n`;
+      for (const id of activeTaskIds) {
         const t = this.taskQueue.getById(id);
         if (t) msg += `- ${id}: ${t.description.slice(0, 120)}\n`;
       }
@@ -550,8 +572,8 @@ export class Subplanner {
     logger.debug("Built follow-up subplanner prompt", {
       length: msg.length,
       newHandoffs: newHandoffs.length,
-      activeTasks: activeTasks.size,
-      dispatchedIds: dispatchedTaskIds.size,
+      activeTasks: subtaskStore.getActiveCount(),
+      dispatchedIds: subtaskStore.getTaskCount(),
     });
     return msg;
   }
@@ -559,17 +581,18 @@ export class Subplanner {
   private buildSubtasksFromRaw(
     rawTasks: RawTaskInput[],
     parentTask: Task,
-    dispatchedTaskIds: Set<string>,
+    subtaskStore: TaskStore,
+    existingTaskCount: number,
   ): Task[] {
     const filtered = rawTasks.filter((r) => r.description?.trim());
     const subtasks: Task[] = [];
-    let subCounter = dispatchedTaskIds.size;
+    let subCounter = existingTaskCount;
 
     for (const raw of filtered) {
       subCounter++;
       const id = raw.id || `${parentTask.id}-sub-${subCounter}`;
 
-      if (dispatchedTaskIds.has(id)) {
+      if (subtaskStore.hasTask(id)) {
         logger.warn("Skipping duplicate subtask ID from LLM", {
           subtaskId: id,
           parentTaskId: parentTask.id,
@@ -638,8 +661,7 @@ export class Subplanner {
     parentTask: Task,
     currentDepth: number,
     pendingHandoffs: { subtask: Task; handoff: Handoff }[],
-    activeTasks: Set<string>,
-    dispatchedTaskIds: Set<string>,
+    subtaskStore: TaskStore,
     parentSpan?: Span,
   ): void {
     for (const subtask of tasks) {
@@ -648,8 +670,7 @@ export class Subplanner {
         cb(subtask, subtask.parentId || "unknown");
       }
 
-      dispatchedTaskIds.add(subtask.id);
-      activeTasks.add(subtask.id);
+      subtaskStore.markActive(subtask.id, subtask.branch, subtask.retryCount ?? 0);
 
       const promise = (async () => {
         await this.dispatchLimiter.acquire();
@@ -697,8 +718,10 @@ export class Subplanner {
 
           if (handoff.status === "complete") {
             this.taskQueue.completeTask(subtask.id);
+            subtaskStore.markStatus(subtask.id, "complete", subtask.retryCount ?? 0);
           } else {
             this.taskQueue.failTask(subtask.id);
+            subtaskStore.markStatus(subtask.id, "failed", subtask.retryCount ?? 0);
           }
 
           logger.info("Subtask completed", {
@@ -714,13 +737,13 @@ export class Subplanner {
           pendingHandoffs.push({ subtask, handoff });
         } catch (error) {
           this.taskQueue.failTask(subtask.id);
+          subtaskStore.markStatus(subtask.id, "failed", subtask.retryCount ?? 0);
           const err = error instanceof Error ? error : new Error(String(error));
           logger.error("Subtask dispatch failed", { subtaskId: subtask.id, error: err.message });
 
           pendingHandoffs.push({ subtask, handoff: createFailureHandoff(subtask, err) });
         } finally {
           this.dispatchLimiter.release();
-          activeTasks.delete(subtask.id);
         }
       })();
 
@@ -730,7 +753,6 @@ export class Subplanner {
           subtaskId: subtask.id,
           error: err.message,
         });
-        activeTasks.delete(subtask.id);
         for (const cb of this.errorCallbacks) {
           cb(err, parentTask.id);
         }

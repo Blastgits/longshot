@@ -13,7 +13,7 @@ The package is organized in 7 dependency layers, each building on the one below.
 | Layer | Files | Responsibility |
 |-------|-------|---------------|
 | 0 — Foundation | `config.ts`, `shared.ts` | Env config, repo state reading, Pi session helpers, concurrency primitives |
-| 1 — Data | `task-queue.ts`, `scope-tracker.ts` | Task state machine + priority queue, file-lock tracking |
+| 1 — Data | `task-queue.ts`, `task-store.ts`, `scope-tracker.ts` | Task state machine + priority queue, durable task-state journal, file-lock tracking |
 | 2 — LLM | `llm-client.ts` | Multi-endpoint routing, latency-adaptive weighting, health tracking |
 | 3 — Workers | `worker-pool.ts` | Ephemeral model: spawns `spawn_sandbox.py` per task |
 | 4 — Merge | `merge-queue.ts` | Priority queue, conflict retry with rebase, background drain |
@@ -28,6 +28,7 @@ The package is organized in 7 dependency layers, each building on the one below.
 | `config.ts` | Parses all env vars into `OrchestratorConfig`. Supports single (`LLM_BASE_URL`) and multi-endpoint (`LLM_ENDPOINTS`) LLM config |
 | `shared.ts` | `readRepoState`, `parsePlannerResponse`, `ConcurrencyLimiter`, `GitMutex`, `slugifyForBranch`, Pi session factory |
 | `task-queue.ts` | `PriorityQueue` (min-heap) + `TaskQueue` (state machine with callbacks) |
+| `task-store.ts` | `TaskStore` interface + in-memory/journal implementations for durable task dispatch state |
 | `scope-tracker.ts` | `ScopeTracker` — maps active task IDs to locked file sets, detects overlaps |
 | `llm-client.ts` | `LLMClient` — weighted endpoint selection, EMA latency tracking, `waitForReady` probe |
 | `worker-pool.ts` | `WorkerPool` — ephemeral model, streams sandbox stdout as NDJSON progress events |

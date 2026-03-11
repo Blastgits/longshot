@@ -11,4 +11,5 @@ export * from "./scope-tracker.js";
 export * from "./shared.js";
 export * from "./subplanner.js";
 export * from "./task-queue.js";
+export * from "./task-store.js";
 export * from "./worker-pool.js";

@@ -52,6 +52,8 @@ describe("config", () => {
       assert.strictEqual(config.sandbox.idleTimeout, 300);
       assert.strictEqual(config.targetRepoPath, "./target-repo");
       assert.strictEqual(config.pythonPath, "python3");
+      assert.strictEqual(config.stateDir, "./taskstore-state");
+      assert.match(config.runId, /^run-\d+$/);
       assert.strictEqual(config.healthCheckInterval, 10);
       assert.strictEqual(config.readinessTimeoutMs, 120_000);
     });
@@ -74,6 +76,8 @@ describe("config", () => {
       SANDBOX_IDLE_TIMEOUT: "600",
       TARGET_REPO_PATH: "/custom/path",
       PYTHON_PATH: "/usr/bin/python",
+      TASKSTORE_STATE_DIR: "/var/lib/longshot/state",
+      ORCHESTRATOR_RUN_ID: "run-custom-123",
       HEALTH_CHECK_INTERVAL: "30",
     };
 
@@ -94,6 +98,8 @@ describe("config", () => {
       assert.strictEqual(config.sandbox.idleTimeout, 600);
       assert.strictEqual(config.targetRepoPath, "/custom/path");
       assert.strictEqual(config.pythonPath, "/usr/bin/python");
+      assert.strictEqual(config.stateDir, "/var/lib/longshot/state");
+      assert.strictEqual(config.runId, "run-custom-123");
       assert.strictEqual(config.healthCheckInterval, 30);
     });
   });

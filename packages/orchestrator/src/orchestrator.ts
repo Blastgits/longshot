@@ -4,10 +4,8 @@
  * Orchestrator Factory — creates and wires all components.
  */
 
-import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { promisify } from "node:util";
 import type { Handoff, MetricsSnapshot, Task } from "@longshot/core";
 import { createLogger, createTracer, type Tracer } from "@longshot/core";
 import { loadConfig, type OrchestratorConfig } from "./config.js";
@@ -18,9 +16,9 @@ import { Reconciler, type SweepResult } from "./reconciler.js";
 import { GitMutex } from "./shared.js";
 import { DEFAULT_SUBPLANNER_CONFIG, Subplanner } from "./subplanner.js";
 import { TaskQueue } from "./task-queue.js";
+import { JournalTaskStore, type TaskStore } from "./task-store.js";
 import { WorkerPool } from "./worker-pool.js";
 
-const _execFileAsync = promisify(execFile);
 const logger = createLogger("orchestrator", "root-planner");
 
 // ---------------------------------------------------------------------------
@@ -51,6 +49,7 @@ export interface Orchestrator {
   monitor: Monitor;
   workerPool: WorkerPool;
   taskQueue: TaskQueue;
+  taskStore: TaskStore;
   mergeQueue: MergeQueue;
   config: OrchestratorConfig;
   tracer: Tracer;
@@ -85,7 +84,9 @@ export interface CreateOrchestratorOptions {
    * Override individual config values loaded from env.
    * Applied on top of loadConfig().
    */
-  configOverrides?: Partial<Pick<OrchestratorConfig, "maxWorkers" | "targetRepoPath">>;
+  configOverrides?: Partial<
+    Pick<OrchestratorConfig, "maxWorkers" | "targetRepoPath" | "stateDir" | "runId">
+  >;
 
   /** Max planner iterations before stopping. Default: 100. */
   maxIterations?: number;
@@ -123,6 +124,12 @@ export async function createOrchestrator(
   if (options.configOverrides?.targetRepoPath !== undefined) {
     config.targetRepoPath = options.configOverrides.targetRepoPath;
   }
+  if (options.configOverrides?.stateDir !== undefined) {
+    config.stateDir = options.configOverrides.stateDir;
+  }
+  if (options.configOverrides?.runId !== undefined) {
+    config.runId = options.configOverrides.runId;
+  }
   if (options.finalizationMaxAttempts !== undefined) {
     config.finalization.maxAttempts = options.finalizationMaxAttempts;
   }
@@ -133,6 +140,8 @@ export async function createOrchestrator(
   logger.info("Config loaded", {
     maxWorkers: config.maxWorkers,
     targetRepo: config.targetRepoPath,
+    stateDir: config.stateDir,
+    runId: config.runId,
   });
   logger.debug("Full config", {
     maxWorkers: config.maxWorkers,
@@ -173,6 +182,7 @@ export async function createOrchestrator(
 
   // --- Components ---
   const taskQueue = new TaskQueue();
+  const taskStore = new JournalTaskStore({ stateDir: config.stateDir, runId: config.runId });
   const gitMutex = new GitMutex();
 
   const workerPool = new WorkerPool(
@@ -222,6 +232,8 @@ export async function createOrchestrator(
     monitor,
     rootPrompt,
     subplanner,
+    undefined,
+    taskStore,
   );
 
   const reconciler = new Reconciler(
@@ -267,6 +279,7 @@ export async function createOrchestrator(
     monitor,
     workerPool,
     taskQueue,
+    taskStore,
     mergeQueue,
     config,
     tracer,

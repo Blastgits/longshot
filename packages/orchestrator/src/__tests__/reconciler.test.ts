@@ -28,6 +28,8 @@ function baseConfig() {
     },
     targetRepoPath: "/tmp/repo",
     pythonPath: "python3",
+    stateDir: "/tmp/taskstore-state",
+    runId: "test-run",
     healthCheckInterval: 10,
     readinessTimeoutMs: 120_000,
     finalization: {
@@ -164,5 +166,73 @@ describe("Reconciler", () => {
     assert.strictEqual(reconciler.isRunning(), true);
     reconciler.stop();
     assert.strictEqual(reconciler.isRunning(), false);
+  });
+
+  it("skips expensive sweep checks when repo fingerprint is unchanged after green result", async () => {
+    let tscCalls = 0;
+    let buildCalls = 0;
+    let testCalls = 0;
+    let llmCalled = false;
+
+    const runCommand: ReconcilerDeps["runCommand"] = async (cmd, args) => {
+      if (cmd === "git" && args[0] === "rev-parse") {
+        return { stdout: "abc123\n", stderr: "", code: 0 };
+      }
+      if (cmd === "git" && args[0] === "status") {
+        return { stdout: "", stderr: "", code: 0 };
+      }
+      if (cmd === "git" && args[0] === "grep") {
+        return { stdout: "", stderr: "", code: 1 };
+      }
+      if (cmd === "git" && args[0] === "log") {
+        return { stdout: "abc123 commit", stderr: "", code: 0 };
+      }
+      if (cmd === "npx") {
+        tscCalls++;
+        return { stdout: "", stderr: "", code: 0 };
+      }
+      if (cmd === "npm" && args[0] === "run") {
+        buildCalls++;
+        return { stdout: "", stderr: "", code: 0 };
+      }
+      if (cmd === "npm" && args[0] === "test") {
+        testCalls++;
+        return { stdout: "", stderr: "", code: 0 };
+      }
+
+      return { stdout: "", stderr: "", code: 0 };
+    };
+
+    const monitor = { recordTokenUsage: () => {} };
+    const mergeQueue = { getMergeStats: () => ({ totalMerged: 0 }) };
+    const reconciler = new Reconciler(
+      baseConfig(),
+      { intervalMs: 1_000, maxFixTasks: 5 },
+      {} as TaskQueue,
+      mergeQueue as never,
+      monitor as never,
+      "system prompt",
+      {
+        runCommand,
+        completeLLM: async () => {
+          llmCalled = true;
+          return {
+            content: "[]",
+            usage: { promptTokens: 0, completionTokens: 0, totalTokens: 0 },
+            finishReason: "stop",
+            endpoint: "primary",
+            latencyMs: 1,
+          };
+        },
+      },
+    );
+
+    await reconciler.sweep();
+    await reconciler.sweep();
+
+    assert.strictEqual(tscCalls, 1);
+    assert.strictEqual(buildCalls, 1);
+    assert.strictEqual(testCalls, 1);
+    assert.strictEqual(llmCalled, false);
   });
 });

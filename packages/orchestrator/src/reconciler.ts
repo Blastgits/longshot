@@ -130,6 +130,8 @@ export class Reconciler {
   private errorCallbacks: ((error: Error) => void)[];
 
   private recentFixScopes: Set<string> = new Set();
+  private lastRepoFingerprint: string | null = null;
+  private lastSweepWasGreen = false;
 
   constructor(
     config: OrchestratorConfig,
@@ -230,6 +232,37 @@ export class Reconciler {
     const sweepSpan = this.tracer?.startSpan("reconciler.sweep", { agentId: "reconciler" });
 
     const mergeCountBefore = this.mergeQueue.getMergeStats().totalMerged;
+    const repoFingerprint = await this.computeRepoFingerprint();
+
+    if (repoFingerprint && this.lastRepoFingerprint === repoFingerprint && this.lastSweepWasGreen) {
+      logger.info("Skipping reconciler sweep; repository unchanged since last green result", {
+        fingerprint: repoFingerprint,
+      });
+
+      this.consecutiveGreenSweeps++;
+      this.recentFixScopes.clear();
+      if (this.consecutiveGreenSweeps >= 3) {
+        this.adjustInterval(this.maxIntervalMs);
+      }
+
+      sweepSpan?.setAttributes({
+        skippedUnchanged: true,
+        fingerprint: repoFingerprint,
+        fixTasksCreated: 0,
+      });
+      sweepSpan?.setStatus("ok");
+      sweepSpan?.end();
+
+      return {
+        buildOk: true,
+        testsOk: true,
+        hasConflictMarkers: false,
+        buildOutput: "",
+        testOutput: "",
+        conflictFiles: [],
+        fixTasks: [],
+      };
+    }
 
     const buildSpan = sweepSpan?.child("reconciler.build");
     logger.debug("Running tsc --noEmit", { targetRepo: this.targetRepoPath });
@@ -324,6 +357,8 @@ export class Reconciler {
 
       this.consecutiveGreenSweeps++;
       this.recentFixScopes.clear();
+      this.lastRepoFingerprint = repoFingerprint;
+      this.lastSweepWasGreen = true;
       if (this.consecutiveGreenSweeps >= 3) {
         this.adjustInterval(this.maxIntervalMs);
       }
@@ -355,6 +390,8 @@ export class Reconciler {
       });
       sweepSpan?.setStatus("ok", "stale skip");
       sweepSpan?.end();
+      this.lastRepoFingerprint = null;
+      this.lastSweepWasGreen = false;
       return {
         buildOk,
         testsOk,
@@ -446,6 +483,8 @@ export class Reconciler {
       });
       sweepSpan?.setStatus("error", `LLM unreachable: ${errMsg}`);
       sweepSpan?.end();
+      this.lastRepoFingerprint = repoFingerprint;
+      this.lastSweepWasGreen = false;
       return {
         buildOk,
         testsOk,
@@ -505,6 +544,8 @@ export class Reconciler {
     // Adaptive sweep: errors detected, reset green counter and speed up
     this.consecutiveGreenSweeps = 0;
     this.adjustInterval(this.minIntervalMs);
+    this.lastRepoFingerprint = repoFingerprint;
+    this.lastSweepWasGreen = false;
 
     return {
       buildOk,
@@ -515,6 +556,30 @@ export class Reconciler {
       conflictFiles,
       fixTasks: tasks,
     };
+  }
+
+  private async computeRepoFingerprint(): Promise<string | null> {
+    const headResult = await this.runCommand("git", ["rev-parse", "HEAD"], this.targetRepoPath);
+    if (headResult.code !== 0) {
+      return null;
+    }
+
+    const statusResult = await this.runCommand(
+      "git",
+      ["status", "--porcelain"],
+      this.targetRepoPath,
+    );
+    if (statusResult.code !== 0) {
+      return null;
+    }
+
+    const head = headResult.stdout.trim();
+    const dirty = statusResult.stdout.trim().length > 0 ? "dirty" : "clean";
+    if (!head) {
+      return null;
+    }
+
+    return `${head}:${dirty}`;
   }
 
   /**

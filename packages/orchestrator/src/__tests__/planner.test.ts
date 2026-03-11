@@ -33,6 +33,8 @@ function createConfig(): OrchestratorConfig {
     },
     targetRepoPath: "/tmp/repo",
     pythonPath: "python3",
+    stateDir: "/tmp/taskstore-state",
+    runId: "test-run",
     healthCheckInterval: 10,
     readinessTimeoutMs: 120_000,
     finalization: {
