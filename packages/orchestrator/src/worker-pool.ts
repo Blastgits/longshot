@@ -20,6 +20,7 @@ import type { Handoff, HarnessConfig, Span, Task, Tracer } from "@longshot/core"
 import { createLogger } from "@longshot/core";
 
 const logger = createLogger("worker-pool", "root-planner");
+const RESULT_PREFIX = "__LONGSHOT_RESULT__ ";
 
 function isHandoff(value: unknown): value is Handoff {
   if (typeof value !== "object" || value === null) {
@@ -225,11 +226,11 @@ export class WorkerPool {
     return new Promise<Handoff>((resolve, reject) => {
       const proc = this.deps.spawn(
         this.config.pythonPath,
-        ["-u", "infra/spawn_sandbox.py", payload],
+        ["-u", "infra/spawn_sandbox.py", "--stdin"],
         {
           cwd: process.cwd(),
           env: { ...process.env, PYTHONUNBUFFERED: "1" },
-          stdio: ["ignore", "pipe", "pipe"],
+          stdio: ["pipe", "pipe", "pipe"],
         },
       );
 
@@ -241,6 +242,7 @@ export class WorkerPool {
 
       const stdoutLines: string[] = [];
       const stderrChunks: string[] = [];
+      let explicitResultLine: string | null = null;
       let settled = false;
 
       const timer = this.deps.setTimeout(() => {
@@ -265,10 +267,34 @@ export class WorkerPool {
         return;
       }
 
+      if (!proc.stdin) {
+        this.deps.clearTimeout(timer);
+        settled = true;
+        reject(new Error(`Sandbox process stdin unavailable for task ${taskId}`));
+        return;
+      }
+
+      proc.stdin.on("error", (err: Error) => {
+        if (settled) return;
+        this.deps.clearTimeout(timer);
+        settled = true;
+        reject(new Error(`Failed to stream payload to sandbox process: ${err.message}`));
+      });
+
+      proc.stdin.write(payload, "utf-8");
+      proc.stdin.end();
+
       const rl = this.deps.createInterface({ input: proc.stdout });
 
       rl.on("line", (line: string) => {
         stdoutLines.push(line);
+
+        if (line.startsWith(RESULT_PREFIX)) {
+          explicitResultLine = line.slice(RESULT_PREFIX.length);
+          logger.debug("Captured explicit sandbox result line", { taskId });
+          return;
+        }
+
         this.forwardWorkerLine(taskId, line);
 
         if (workerSpan) {
@@ -323,14 +349,15 @@ export class WorkerPool {
           return;
         }
 
-        const lastLine = stdoutLines.at(-1);
-        if (!lastLine) {
+        const fallbackLine = stdoutLines.at(-1);
+        const resultLine = explicitResultLine ?? fallbackLine;
+        if (!resultLine) {
           reject(new Error(`Sandbox produced invalid output for task ${taskId}`));
           return;
         }
 
         try {
-          const parsed: unknown = JSON.parse(lastLine);
+          const parsed: unknown = JSON.parse(resultLine);
           if (!isHandoff(parsed)) {
             throw new Error("Sandbox output did not match Handoff shape");
           }
@@ -338,7 +365,9 @@ export class WorkerPool {
           resolve(parsed);
         } catch {
           reject(
-            new Error(`Failed to parse sandbox output as Handoff JSON: ${lastLine.slice(0, 200)}`),
+            new Error(
+              `Failed to parse sandbox output as Handoff JSON: ${resultLine.slice(0, 200)}`,
+            ),
           );
         }
       });
