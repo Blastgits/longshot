@@ -72,6 +72,8 @@ export interface ReconcilerDeps {
   runCommand: ReconcilerRunCommand;
   completeLLM: ReconcilerCompleteLLM;
   now: () => number;
+  setTimeout: typeof setTimeout;
+  clearTimeout: typeof clearTimeout;
 }
 
 export interface SweepResult {
@@ -117,7 +119,7 @@ export class Reconciler {
   private targetRepoPath: string;
 
   private tracer: Tracer | null = null;
-  private timer: ReturnType<typeof setInterval> | null;
+  private timer: ReturnType<typeof setTimeout> | null;
   private running: boolean;
   private fixCounter: number;
 
@@ -128,6 +130,8 @@ export class Reconciler {
 
   private sweepCompleteCallbacks: ((result: SweepResult) => void)[];
   private errorCallbacks: ((error: Error) => void)[];
+  private setTimeoutFn: typeof setTimeout;
+  private clearTimeoutFn: typeof clearTimeout;
 
   private recentFixScopes: Set<string> = new Set();
 
@@ -169,6 +173,8 @@ export class Reconciler {
       ((messages, overrides, span) => llmClient.complete(messages, overrides, span));
     this.runCommand = deps?.runCommand ?? runCommand;
     this.now = deps?.now ?? (() => Date.now());
+    this.setTimeoutFn = deps?.setTimeout ?? setTimeout;
+    this.clearTimeoutFn = deps?.clearTimeout ?? clearTimeout;
 
     this.sweepCompleteCallbacks = [];
     this.errorCallbacks = [];
@@ -184,23 +190,8 @@ export class Reconciler {
   start(): void {
     if (this.running) return;
     this.running = true;
-
-    this.timer = setInterval(async () => {
-      try {
-        const result = await this.sweep();
-        for (const cb of this.sweepCompleteCallbacks) {
-          cb(result);
-        }
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
-        logger.error("Sweep failed", { error: err.message });
-        for (const cb of this.errorCallbacks) {
-          cb(err);
-        }
-      }
-    }, this.reconcilerConfig.intervalMs);
-
-    logger.info("Reconciler started", { intervalMs: this.reconcilerConfig.intervalMs });
+    this.scheduleNextSweep();
+    logger.info("Reconciler started", { intervalMs: this.currentIntervalMs });
   }
 
   /**
@@ -208,7 +199,7 @@ export class Reconciler {
    */
   stop(): void {
     if (this.timer) {
-      clearInterval(this.timer);
+      this.clearTimeoutFn(this.timer);
       this.timer = null;
     }
     this.running = false;
@@ -539,27 +530,47 @@ export class Reconciler {
     if (this.currentIntervalMs === targetMs) return;
     this.currentIntervalMs = targetMs;
 
-    if (this.timer) {
-      clearInterval(this.timer);
-      this.timer = setInterval(async () => {
-        try {
-          const result = await this.sweep();
-          for (const cb of this.sweepCompleteCallbacks) {
-            cb(result);
-          }
-        } catch (error) {
-          const err = error instanceof Error ? error : new Error(String(error));
-          logger.error("Sweep failed", { error: err.message });
-          for (const cb of this.errorCallbacks) {
-            cb(err);
-          }
-        }
-      }, this.currentIntervalMs);
+    if (this.running && this.timer) {
+      this.clearTimeoutFn(this.timer);
+      this.scheduleNextSweep();
     }
 
     logger.info("Adjusted sweep interval", {
       newIntervalMs: this.currentIntervalMs,
       consecutiveGreen: this.consecutiveGreenSweeps,
     });
+  }
+
+  private scheduleNextSweep(): void {
+    if (!this.running) {
+      return;
+    }
+
+    this.timer = this.setTimeoutFn(() => this.runScheduledSweep(), this.currentIntervalMs);
+  }
+
+  private async runScheduledSweep(): Promise<void> {
+    if (!this.running) {
+      return;
+    }
+
+    this.timer = null;
+
+    try {
+      const result = await this.sweep();
+      for (const cb of this.sweepCompleteCallbacks) {
+        cb(result);
+      }
+    } catch (error) {
+      const err = error instanceof Error ? error : new Error(String(error));
+      logger.error("Sweep failed", { error: err.message });
+      for (const cb of this.errorCallbacks) {
+        cb(err);
+      }
+    } finally {
+      if (this.running && !this.timer) {
+        this.scheduleNextSweep();
+      }
+    }
   }
 }
