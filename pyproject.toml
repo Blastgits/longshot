@@ -25,9 +25,9 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/andrewcai8/longshot"
-Repository = "https://github.com/andrewcai8/longshot"
-Issues = "https://github.com/andrewcai8/longshot/issues"
+Homepage = "https://github.com/Blastgits/longshot"
+Repository = "https://github.com/Blastgits/longshot"
+Issues = "https://github.com/Blastgits/longshot/issues"
 
 [project.scripts]
 longshot = "main:main"

@@ -159,4 +159,4 @@ CI will fail on lint errors, so run these before pushing.
 - Dashboard display logic in `main.py` is self-contained Python with no Modal dependency.
 - Documentation and test coverage gaps exist throughout.
 
-Check [github.com/andrewcai8/longshot/issues](https://github.com/andrewcai8/longshot/issues) for open issues before starting something large. For significant changes, open an issue first to discuss the approach.
+Check [github.com/Blastgits/longshot/issues](https://github.com/Blastgits/longshot/issues) for open issues before starting something large. For significant changes, open an issue first to discuss the approach.

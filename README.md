@@ -1,6 +1,6 @@
 # Longshot
 
-[![CI](https://github.com/andrewcai8/longshot/actions/workflows/ci.yml/badge.svg)](https://github.com/andrewcai8/longshot/actions/workflows/ci.yml)
+[![CI](https://github.com/Blastgits/longshot/actions/workflows/ci.yml/badge.svg)](https://github.com/Blastgits/longshot/actions/workflows/ci.yml)
 
 Massively parallel autonomous coding: decompose any project into hundreds of tasks and execute them simultaneously in isolated cloud sandboxes.
 
@@ -104,7 +104,7 @@ On first run, the CLI downloads a matching runtime bundle and installs Node runt
 Optional overrides:
 
 - `LONGSHOT_RUNTIME_URL`: explicit URL for the runtime tarball
-- `LONGSHOT_RELEASE_REPO`: GitHub repo slug for release downloads (default: `andrewcai8/longshot`)
+- `LONGSHOT_RELEASE_REPO`: GitHub repo slug for release downloads (default: `Blastgits/longshot`)
 - `LONGSHOT_CACHE_DIR`: custom cache root for runtime assets
 
 ## Release maintainers

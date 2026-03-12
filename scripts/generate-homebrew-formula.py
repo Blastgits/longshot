@@ -17,7 +17,7 @@ def parse_args() -> FormulaArgs:
     _ = parser.add_argument("--sha256", required=True, help="SHA256 of longshot-{version}.tar.gz")
     _ = parser.add_argument(
         "--repo",
-        default="andrewcai8/longshot",
+        default="Blastgits/longshot",
         help="GitHub repo slug for release assets",
     )
     _ = parser.add_argument(
