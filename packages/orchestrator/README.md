@@ -26,11 +26,11 @@ The package is organized in 7 dependency layers, each building on the one below.
 | File | Description |
 |------|-------------|
 | `config.ts` | Parses all env vars into `OrchestratorConfig`. Supports single (`LLM_BASE_URL`) and multi-endpoint (`LLM_ENDPOINTS`) LLM config |
-| `shared.ts` | `readRepoState`, `parsePlannerResponse`, `ConcurrencyLimiter`, `GitMutex`, `slugifyForBranch`, Pi session factory |
+| `shared.ts` | `readRepoState`, `parsePlannerResponse`, `ConcurrencyLimiter`, `GitMutex`, `WeightedRoundRobinSelector`, `slugifyForBranch`, Pi session factory |
 | `task-queue.ts` | `PriorityQueue` (min-heap) + `TaskQueue` (state machine with callbacks) |
 | `scope-tracker.ts` | `ScopeTracker` — maps active task IDs to locked file sets, detects overlaps |
 | `llm-client.ts` | `LLMClient` — weighted endpoint selection, EMA latency tracking, `waitForReady` probe |
-| `worker-pool.ts` | `WorkerPool` — ephemeral model, streams sandbox stdout as NDJSON progress events |
+| `worker-pool.ts` | `WorkerPool` — ephemeral model, streams sandbox stdout as NDJSON progress events, routes tasks across weighted LLM endpoints |
 | `merge-queue.ts` | `MergeQueue` — sorted by priority, up to 2 conflict retries with rebase, background tick |
 | `planner.ts` | `Planner` — iterative Pi session, delta file-tree/features diffs, `injectTask` for external tasks |
 | `subplanner.ts` | `Subplanner` — recursive decomposer, max depth 3, aggregates subtask handoffs |

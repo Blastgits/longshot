@@ -168,6 +168,8 @@ LLM_ENDPOINTS=[{"name":"primary","endpoint":"https://...","apiKey":"sk-...","wei
 
 Each `weight` must be a positive number. `LLM_MODEL`, `LLM_MAX_TOKENS`, and `LLM_TEMPERATURE` remain global settings shared by all endpoints.
 
+Worker sandboxes honor these weights when choosing which endpoint to call. Planner Pi sessions bind to one selected endpoint per session because the Pi harness can only talk to a single provider at a time.
+
 ### Workers
 
 | Variable | Default | Description |

@@ -19,6 +19,7 @@ import {
   readRepoState,
   sleep,
   slugifyForBranch,
+  WeightedRoundRobinSelector,
 } from "./shared.js";
 import { DEFAULT_SUBPLANNER_CONFIG, type Subplanner, shouldDecompose } from "./subplanner.js";
 import type { TaskQueue } from "./task-queue.js";
@@ -41,6 +42,8 @@ const BACKOFF_MAX_MS = 30_000;
 const MAX_CONSECUTIVE_ERRORS = 10;
 
 const MAX_TASK_RETRIES = 1;
+
+type PlannerEndpoint = OrchestratorConfig["llm"]["endpoints"][number];
 
 export interface PlannerConfig {
   maxIterations: number;
@@ -73,6 +76,7 @@ export class Planner {
   private targetRepoPath: string;
   private subplanner: Subplanner | null;
   private deps: PlannerDeps;
+  private plannerEndpointSelector: WeightedRoundRobinSelector<PlannerEndpoint> | null;
 
   private running: boolean;
   private taskCounter: number;
@@ -124,6 +128,8 @@ export class Planner {
     this.systemPrompt = systemPrompt;
     this.targetRepoPath = config.targetRepoPath;
     this.subplanner = subplanner ?? null;
+    this.plannerEndpointSelector =
+      config.llm.endpoints.length > 0 ? new WeightedRoundRobinSelector(config.llm.endpoints) : null;
 
     this.deps = {
       createPlannerPiSession,
@@ -165,10 +171,12 @@ export class Planner {
     if (this.piSession) return;
 
     logger.info("Initializing Pi agent session for planner");
+    const llmEndpoint = this.plannerEndpointSelector?.next();
     this.piSession = await this.deps.createPlannerPiSession({
       systemPrompt: this.systemPrompt,
       targetRepoPath: this.targetRepoPath,
       llmConfig: this.config.llm,
+      llmEndpoint,
     });
     this.lastTotalTokens = 0;
     logger.info("Pi agent session ready");

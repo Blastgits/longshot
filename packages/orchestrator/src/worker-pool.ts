@@ -18,8 +18,11 @@ import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 import type { Handoff, HarnessConfig, Span, Task, Tracer } from "@longshot/core";
 import { createLogger } from "@longshot/core";
+import { WeightedRoundRobinSelector } from "./shared.js";
 
 const logger = createLogger("worker-pool", "root-planner");
+
+type WorkerEndpoint = HarnessConfig["llm"]["endpoints"][number];
 
 function isHandoff(value: unknown): value is Handoff {
   if (typeof value !== "object" || value === null) {
@@ -83,6 +86,7 @@ export class WorkerPool {
   private workerFailedCallbacks: ((taskId: string, error: Error) => void)[];
   private activeToolCalls: Map<string, number>;
   private timedOutBranches: string[] = [];
+  private endpointSelector: WeightedRoundRobinSelector<WorkerEndpoint> | null;
 
   constructor(
     config: {
@@ -110,6 +114,10 @@ export class WorkerPool {
     this.taskCompleteCallbacks = [];
     this.workerFailedCallbacks = [];
     this.activeToolCalls = new Map();
+    this.endpointSelector =
+      this.config.llm.endpoints.length > 0
+        ? new WeightedRoundRobinSelector(this.config.llm.endpoints)
+        : null;
   }
 
   setTracer(tracer: Tracer): void {
@@ -147,7 +155,7 @@ export class WorkerPool {
     const traceCtx =
       workerSpan && this.tracer ? this.tracer.propagationContext(workerSpan) : undefined;
 
-    const endpoint = this.config.llm.endpoints[0];
+    const endpoint = this.endpointSelector?.next();
     if (!endpoint) {
       throw new Error("No LLM endpoints configured");
     }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Handoff, Task } from "@longshot/core";
-import { parseLLMTaskArray, slugifyForBranch } from "../shared.js";
+import { parseLLMTaskArray, slugifyForBranch, WeightedRoundRobinSelector } from "../shared.js";
 import type { SubplannerConfig } from "../subplanner.js";
 import {
   aggregateHandoffs,
@@ -307,6 +307,33 @@ describe("parseLLMTaskArray", () => {
   it("parses empty array", () => {
     const result = parseLLMTaskArray("[]");
     assert.strictEqual(result.length, 0);
+  });
+});
+
+describe("WeightedRoundRobinSelector", () => {
+  it("distributes selections smoothly according to weight", () => {
+    const selector = new WeightedRoundRobinSelector([
+      { name: "primary", weight: 3 },
+      { name: "backup", weight: 1 },
+    ]);
+
+    const picks = Array.from({ length: 8 }, () => selector.next().name);
+    assert.deepStrictEqual(picks, [
+      "primary",
+      "primary",
+      "backup",
+      "primary",
+      "primary",
+      "primary",
+      "backup",
+      "primary",
+    ]);
+  });
+
+  it("rejects empty selector inputs", () => {
+    assert.throws(() => new WeightedRoundRobinSelector([]), {
+      message: /requires at least one item/,
+    });
   });
 });
 

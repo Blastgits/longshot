@@ -89,7 +89,7 @@ LLM_ENDPOINTS='[
 ]'
 ```
 
-When `LLM_ENDPOINTS` is set, the client uses weighted routing with latency-aware rebalancing and failover across the listed endpoints. The top-level `LLM_BASE_URL` and `LLM_API_KEY` vars are ignored.
+When `LLM_ENDPOINTS` is set, the client uses weighted routing with latency-aware rebalancing and failover across the listed endpoints. Worker sandboxes also use weighted selection when choosing their per-task endpoint. Planner Pi sessions bind to one selected endpoint per session because the Pi harness can only talk to a single provider at a time. The top-level `LLM_BASE_URL` and `LLM_API_KEY` vars are ignored.
 
 Each entry must provide:
 
