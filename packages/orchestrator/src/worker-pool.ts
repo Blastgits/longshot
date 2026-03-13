@@ -157,6 +157,7 @@ export class WorkerPool {
 
     const endpoint = this.endpointSelector?.next();
     if (!endpoint) {
+      this.activeWorkers.delete(worker.id);
       throw new Error("No LLM endpoints configured");
     }
 

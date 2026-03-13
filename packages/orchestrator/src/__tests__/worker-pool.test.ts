@@ -74,6 +74,7 @@ describe("WorkerPool", () => {
       () => pool.assignTask(makeTask("task-no-endpoint")),
       /No LLM endpoints configured/,
     );
+    assert.strictEqual(pool.getWorkerCount(), 0);
   });
 
   it("returns handoff, fires callbacks, and clears worker state on success", async () => {
