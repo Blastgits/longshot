@@ -218,19 +218,36 @@ export class Span {
 
 export class Tracer {
   private readonly traceId: string;
+  private propagatedParentSpanId: string | undefined;
 
-  constructor(traceId?: string) {
+  constructor(traceId?: string, propagatedParentSpanId?: string) {
     this.traceId = traceId ?? randomUUID();
+    this.propagatedParentSpanId = propagatedParentSpanId;
   }
 
   /** Start a new span. */
-  startSpan(name: string, opts?: { parent?: Span; taskId?: string; agentId?: string }): Span {
-    return new Span(name, this, opts?.parent?.spanId, opts?.taskId, opts?.agentId);
+  startSpan(
+    name: string,
+    opts?: {
+      parent?: Span;
+      parentSpanId?: string;
+      taskId?: string;
+      agentId?: string;
+    },
+  ): Span {
+    const explicitParentSpanId = opts?.parent?.spanId ?? opts?.parentSpanId;
+    const inheritedParentSpanId = explicitParentSpanId ?? this.propagatedParentSpanId;
+
+    if (!explicitParentSpanId && this.propagatedParentSpanId) {
+      this.propagatedParentSpanId = undefined;
+    }
+
+    return new Span(name, this, inheritedParentSpanId, opts?.taskId, opts?.agentId);
   }
 
   /** Recreate a Tracer from a propagated context (e.g. from a sandbox worker). */
   static fromPropagated(ctx: { traceId: string; parentSpanId: string }): Tracer {
-    return new Tracer(ctx.traceId);
+    return new Tracer(ctx.traceId, ctx.parentSpanId);
   }
 
   /** Serialize context for passing to child processes. */

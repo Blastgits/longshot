@@ -202,7 +202,55 @@ describe("tracer", () => {
     assert.ok(childBegin && typeof childBegin === "object");
     const childTrace = (childBegin as Record<string, unknown>).trace as Record<string, unknown>;
     assert.strictEqual(childTrace.traceId, "trace-prop");
-    assert.strictEqual(childTrace.parentSpanId, undefined);
+    assert.strictEqual(childTrace.parentSpanId, spanA.spanId);
+
+    await fs.rm(root, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("applies propagated parent to first span only when no explicit parent is passed", async () => {
+    const root = await createTempDir("core-tracer-test-");
+    const { traceFile } = enableTracing(root);
+
+    const tracer = Tracer.fromPropagated({ traceId: "trace-once", parentSpanId: "upstream-123" });
+    const first = tracer.startSpan("first");
+    const second = tracer.startSpan("second");
+    first.end();
+    second.end();
+    closeTracing();
+
+    const events = await readNdjsonEventually(traceFile, 4);
+
+    const firstBegin = events.find((e) => {
+      if (!e || typeof e !== "object") return false;
+      const obj = e as Record<string, unknown>;
+      const trace = obj.trace;
+      if (!trace || typeof trace !== "object") return false;
+      return (
+        obj.spanKind === "begin" &&
+        obj.spanName === "first" &&
+        (trace as Record<string, unknown>).spanId === first.spanId
+      );
+    });
+
+    const secondBegin = events.find((e) => {
+      if (!e || typeof e !== "object") return false;
+      const obj = e as Record<string, unknown>;
+      const trace = obj.trace;
+      if (!trace || typeof trace !== "object") return false;
+      return (
+        obj.spanKind === "begin" &&
+        obj.spanName === "second" &&
+        (trace as Record<string, unknown>).spanId === second.spanId
+      );
+    });
+
+    assert.ok(firstBegin && typeof firstBegin === "object");
+    assert.ok(secondBegin && typeof secondBegin === "object");
+
+    const firstTrace = (firstBegin as Record<string, unknown>).trace as Record<string, unknown>;
+    const secondTrace = (secondBegin as Record<string, unknown>).trace as Record<string, unknown>;
+    assert.strictEqual(firstTrace.parentSpanId, "upstream-123");
+    assert.strictEqual(secondTrace.parentSpanId, undefined);
 
     await fs.rm(root, { recursive: true, force: true }).catch(() => {});
   });
