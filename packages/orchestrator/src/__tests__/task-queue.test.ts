@@ -166,6 +166,19 @@ describe("TaskQueue", () => {
     );
   });
 
+  it("enqueue rejects duplicate task IDs", () => {
+    const taskQueue = new TaskQueue();
+    const taskId = "task-duplicate";
+    const first = makeTask({ id: taskId, description: "first" });
+    const second = makeTask({ id: taskId, description: "second" });
+
+    taskQueue.enqueue(first);
+
+    assert.throws(() => taskQueue.enqueue(second), /already exists/);
+    assert.strictEqual(taskQueue.getTotalCount(), 1);
+    assert.strictEqual(taskQueue.getById(taskId)?.description, "first");
+  });
+
   it("getNextPending returns highest priority", () => {
     const taskQueue = new TaskQueue();
 

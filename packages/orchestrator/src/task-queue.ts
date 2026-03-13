@@ -196,6 +196,10 @@ export class TaskQueue {
       );
     }
 
+    if (this.tasks.has(task.id)) {
+      throw new Error(`Task ${task.id} already exists`);
+    }
+
     this.tasks.set(task.id, task);
     this.pendingQueue.enqueue(task);
   }
