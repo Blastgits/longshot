@@ -88,7 +88,7 @@ jobs:
           find dist -type f \( -name "*.whl" -o -name "*.tar.gz" \) | sort | xargs sha256sum > dist/SHA256SUMS
 
       - name: Upload release artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: release-assets
           path: |
@@ -170,7 +170,7 @@ jobs:
             --repo "${{ github.repository }}"
 
       - name: Upload Homebrew formula artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: homebrew-formula
           path: packaging/homebrew/longshot.rb
