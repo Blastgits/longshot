@@ -4,10 +4,12 @@ import { LLMClient } from "../llm-client.js";
 
 const originalFetch = globalThis.fetch;
 const originalRandom = Math.random;
+const originalDateNow = Date.now;
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   Math.random = originalRandom;
+  Date.now = originalDateNow;
 });
 
 describe("LLMClient", () => {
@@ -136,5 +138,112 @@ describe("LLMClient", () => {
         }),
       (err: Error) => err.message.includes('LLM endpoint "bad" must have a positive weight'),
     );
+  });
+
+  it("marks an endpoint unhealthy after consecutive failures and recovers after probe window", async () => {
+    let now = 1_000_000;
+    Date.now = () => now;
+    Math.random = () => 0;
+
+    const attempts: string[] = [];
+    let shouldPrimaryFail = true;
+
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      attempts.push(url);
+
+      if (url.includes("/v1/models")) {
+        return new Response("{}", { status: 200 });
+      }
+
+      if (url.startsWith("https://primary.example.com") && shouldPrimaryFail) {
+        return new Response("primary down", { status: 500 });
+      }
+
+      const body = JSON.stringify({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      });
+      return new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+
+    const client = new LLMClient({
+      endpoints: [
+        { name: "primary", endpoint: "https://primary.example.com", weight: 50 },
+        { name: "backup", endpoint: "https://backup.example.com", weight: 50 },
+      ],
+      model: "test-model",
+      maxTokens: 32,
+      temperature: 0,
+      timeoutMs: 1_000,
+    });
+
+    for (let i = 0; i < 3; i++) {
+      const result = await client.complete([{ role: "user", content: `try ${i}` }]);
+      assert.strictEqual(result.endpoint, "backup");
+      now += 1_000;
+    }
+
+    const primaryAfterFailures = client.getEndpointStats().find((s) => s.name === "primary");
+    assert.ok(primaryAfterFailures);
+    assert.strictEqual(primaryAfterFailures.healthy, false);
+    assert.strictEqual(primaryAfterFailures.totalFailures, 3);
+
+    now += 31_000;
+    shouldPrimaryFail = false;
+    const recovered = await client.complete([{ role: "user", content: "recovery probe" }]);
+    assert.strictEqual(recovered.endpoint, "primary");
+
+    const primaryAfterRecovery = client.getEndpointStats().find((s) => s.name === "primary");
+    assert.ok(primaryAfterRecovery);
+    assert.strictEqual(primaryAfterRecovery.healthy, true);
+
+    assert.ok(attempts.some((url) => url.startsWith("https://primary.example.com")));
+    assert.ok(attempts.some((url) => url.startsWith("https://backup.example.com")));
+  });
+
+  it("respects weighted ordering when selecting first-attempt endpoints", async () => {
+    const randomSequence = [0.99, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let randomIndex = 0;
+    Math.random = () => {
+      const value = randomSequence[randomIndex] ?? 0.99;
+      randomIndex++;
+      return value;
+    };
+
+    const firstAttemptEndpoints: string[] = [];
+
+    globalThis.fetch = async (input) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const endpoint = url.startsWith("https://primary.example.com")
+        ? "primary"
+        : url.startsWith("https://backup.example.com")
+          ? "backup"
+          : "other";
+      firstAttemptEndpoints.push(endpoint);
+
+      const body = JSON.stringify({
+        choices: [{ message: { content: "ok" }, finish_reason: "stop" }],
+        usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
+      });
+      return new Response(body, { status: 200, headers: { "Content-Type": "application/json" } });
+    };
+
+    const client = new LLMClient({
+      endpoints: [
+        { name: "primary", endpoint: "https://primary.example.com", weight: 3 },
+        { name: "backup", endpoint: "https://backup.example.com", weight: 1 },
+      ],
+      model: "test-model",
+      maxTokens: 32,
+      temperature: 0,
+      timeoutMs: 1_000,
+    });
+
+    await client.complete([{ role: "user", content: "weighted 1" }]);
+    await client.complete([{ role: "user", content: "weighted 2" }]);
+    await client.complete([{ role: "user", content: "weighted 3" }]);
+
+    assert.deepStrictEqual(firstAttemptEndpoints, ["backup", "primary", "primary"]);
   });
 });
