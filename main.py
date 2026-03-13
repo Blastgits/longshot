@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -66,6 +67,7 @@ debug_mode = False
 RUNTIME_REPO_DEFAULT = "Blastgits/longshot"
 RUNTIME_ENV_VAR = "LONGSHOT_RUNTIME_URL"
 PROMPTS_ROOT_ENV_VAR = "LONGSHOT_PROMPTS_ROOT"
+MIN_NODE_MAJOR = 22
 
 
 def _runtime_cache_root() -> Path:
@@ -325,11 +327,46 @@ def format_run_summary(
     return "\n".join(lines)
 
 
+def detect_node_major() -> int | None:
+    try:
+        version_result = subprocess.run(
+            ["node", "-v"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+    raw = version_result.stdout.strip() or version_result.stderr.strip()
+    match = re.match(r"^v?(\d+)", raw)
+    if not match:
+        return None
+
+    return int(match.group(1))
+
+
 def run(
     request: str, with_dashboard: bool = False, reset: bool = False, debug: bool = False
 ) -> int:
     global debug_mode
     debug_mode = debug
+
+    node_major = detect_node_major()
+    if node_major is None:
+        print(
+            f"{RED}✗ Unable to detect Node.js runtime.{RESET} "
+            f"Install Node.js {MIN_NODE_MAJOR}+ and ensure `node` is on PATH."
+        )
+        return 1
+
+    if node_major < MIN_NODE_MAJOR:
+        print(
+            f"{RED}✗ Unsupported Node.js version: v{node_major}.{RESET} "
+            f"Longshot requires Node.js {MIN_NODE_MAJOR}+."
+        )
+        print(f"  {DIM}Install/activate Node.js {MIN_NODE_MAJOR}+ and retry.{RESET}")
+        return 1
 
     package_root = Path(__file__).resolve().parent
     runtime_root = resolve_runtime_root(package_root)
