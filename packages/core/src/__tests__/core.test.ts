@@ -12,7 +12,7 @@
  *   logger  — withTask context tagging, per-level stdout suppression
  *
  * Uses Node's built-in node:test + node:assert/strict (no extra dependencies).
- * Git tests spin up real temporary repos via execFileSync and clean up after themselves.
+ * Git tests spin up real hermetic temporary repos and clean up after themselves.
  */
 
 import assert from "node:assert/strict";
@@ -36,30 +36,66 @@ import { createLogger, setLogLevel } from "../logger.js";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Hermetic git environment: isolate from system/global config and supply
+ * author identity so tests cannot fail due to host git configuration.
+ */
+const GIT_HERMETIC_ENV: NodeJS.ProcessEnv = {
+  ...process.env,
+  GIT_CONFIG_NOSYSTEM: "1",
+  HOME: tmpdir(),
+  GIT_COMMITTER_NAME: "Longshot Test",
+  GIT_COMMITTER_EMAIL: "test@longshot.test",
+  GIT_AUTHOR_NAME: "Longshot Test",
+  GIT_AUTHOR_EMAIL: "test@longshot.test",
+};
+
+/**
+ * Run git hermetially: disable signing, hooks, and templates via -c flags.
+ * All calls use an argument array — no shell interpolation.
+ */
+function git(args: string[], cwd: string): void {
+  execFileSync(
+    "git",
+    [
+      "-c",
+      "commit.gpgsign=false",
+      "-c",
+      "tag.gpgsign=false",
+      "-c",
+      "core.hooksPath=/dev/null",
+      "-c",
+      "init.templateDir=",
+      ...args,
+    ],
+    { cwd, stdio: "pipe", env: GIT_HERMETIC_ENV },
+  );
+}
+
 /** Initialise a fresh git repo in a temp directory and return its path. */
 function makeTempRepo(): string {
   const dir = mkdtempSync(join(tmpdir(), "longshot-core-gap-"));
   try {
-    execFileSync("git", ["init", "-b", "main"], { cwd: dir, stdio: "pipe" });
+    git(["init", "-b", "main"], dir);
   } catch {
-    execFileSync("git", ["init"], { cwd: dir, stdio: "pipe" });
-    execFileSync("git", ["symbolic-ref", "HEAD", "refs/heads/main"], { cwd: dir, stdio: "pipe" });
+    git(["init"], dir);
+    git(["symbolic-ref", "HEAD", "refs/heads/main"], dir);
   }
-  execFileSync("git", ["config", "user.email", "test@longshot.test"], { cwd: dir, stdio: "pipe" });
-  execFileSync("git", ["config", "user.name", "Longshot Test"], { cwd: dir, stdio: "pipe" });
+  git(["config", "user.email", "test@longshot.test"], dir);
+  git(["config", "user.name", "Longshot Test"], dir);
   return dir;
 }
 
 /**
  * Stage and commit a single file.
- * Uses execFileSync with an argument array — no shell interpolation.
+ * Uses the hermetic git() helper — no shell interpolation, no signing.
  */
 function seedCommit(dir: string, filename = "README.md", content = "# test"): void {
   const filePath = join(dir, filename);
   mkdirSync(dirname(filePath), { recursive: true });
   writeFileSync(filePath, content);
-  execFileSync("git", ["add", "."], { cwd: dir, stdio: "pipe" });
-  execFileSync("git", ["commit", "-m", `add ${filename}`], { cwd: dir, stdio: "pipe" });
+  git(["add", "."], dir);
+  git(["commit", "-m", `add ${filename}`], dir);
 }
 
 /** Remove a temp directory unconditionally. */
@@ -149,8 +185,8 @@ describe("git — getFileTree", () => {
     writeFileSync(join(dir, "root.txt"), "root");
     writeFileSync(join(dir, "src", "index.ts"), "idx");
     writeFileSync(join(dir, "src", "utils", "helper.ts"), "help");
-    execFileSync("git", ["add", "."], { cwd: dir, stdio: "pipe" });
-    execFileSync("git", ["commit", "-m", "nested"], { cwd: dir, stdio: "pipe" });
+    git(["add", "."], dir);
+    git(["commit", "-m", "nested"], dir);
 
     const files = await getFileTree(dir, 1);
     assert.ok(files.includes("root.txt"));
@@ -162,8 +198,8 @@ describe("git — getFileTree", () => {
     mkdirSync(join(dir, "src", "utils"), { recursive: true });
     writeFileSync(join(dir, "src", "index.ts"), "idx");
     writeFileSync(join(dir, "src", "utils", "helper.ts"), "help");
-    execFileSync("git", ["add", "."], { cwd: dir, stdio: "pipe" });
-    execFileSync("git", ["commit", "-m", "nested"], { cwd: dir, stdio: "pipe" });
+    git(["add", "."], dir);
+    git(["commit", "-m", "nested"], dir);
 
     const files = await getFileTree(dir, 2);
     assert.ok(files.includes("src/index.ts"));
@@ -173,8 +209,8 @@ describe("git — getFileTree", () => {
   it("no maxDepth returns all files", async () => {
     mkdirSync(join(dir, "a", "b", "c"), { recursive: true });
     writeFileSync(join(dir, "a", "b", "c", "deep.ts"), "deep");
-    execFileSync("git", ["add", "."], { cwd: dir, stdio: "pipe" });
-    execFileSync("git", ["commit", "-m", "deep"], { cwd: dir, stdio: "pipe" });
+    git(["add", "."], dir);
+    git(["commit", "-m", "deep"], dir);
 
     assert.ok((await getFileTree(dir)).includes("a/b/c/deep.ts"));
   });
@@ -205,14 +241,14 @@ describe("git — hasUncommittedChanges", () => {
 
   it("returns true after staging a new file", async () => {
     writeFileSync(join(dir, "new.txt"), "new");
-    execFileSync("git", ["add", "new.txt"], { cwd: dir, stdio: "pipe" });
+    git(["add", "new.txt"], dir);
     assert.strictEqual(await hasUncommittedChanges(dir), true);
   });
 
   it("returns false after committing the change", async () => {
     writeFileSync(join(dir, "README.md"), "updated");
-    execFileSync("git", ["add", "."], { cwd: dir, stdio: "pipe" });
-    execFileSync("git", ["commit", "-m", "update"], { cwd: dir, stdio: "pipe" });
+    git(["add", "."], dir);
+    git(["commit", "-m", "update"], dir);
     assert.strictEqual(await hasUncommittedChanges(dir), false);
   });
 });
@@ -316,12 +352,17 @@ describe("git — mergeBranch (rebase)", () => {
 
   afterEach(() => rmDir(dir));
 
-  it("succeeds and replays commits onto main", async () => {
+  it("succeeds and the rebased file is present on main afterward", async () => {
     await createBranch("feat/rb", dir);
-    seedCommit(dir, "rb.txt", "rebased");
+    seedCommit(dir, "rb.txt", "rebased content");
 
     const result = await mergeBranch("feat/rb", "main", "rebase", dir);
     assert.strictEqual(result.success, true);
+
+    // Verify repository state: rb.txt must be present on main after the rebase
+    await checkoutBranch("main", dir);
+    const files = await getFileTree(dir);
+    assert.ok(files.includes("rb.txt"), "rebased file must be present on main after rebase");
   });
 
   it("returns success=false for a non-existent source branch", async () => {
