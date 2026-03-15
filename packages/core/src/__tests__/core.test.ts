@@ -86,9 +86,9 @@ describe("Logger — NDJSON format", () => {
     logger.info("hello world");
 
     assert.strictEqual(lines.length, 1);
-    assert.ok(lines[0]!.endsWith("\n"), "line must end with \\n");
+    assert.ok(lines[0]?.endsWith("\n"), "line must end with \\n");
     // Should parse as valid JSON
-    const entry = JSON.parse(lines[0]!.trim());
+    const entry = JSON.parse(lines[0] ?? "");
     assert.strictEqual(typeof entry, "object");
   });
 
@@ -96,7 +96,7 @@ describe("Logger — NDJSON format", () => {
     const logger = createLogger("agent-2", "reconciler");
     logger.info("check fields");
 
-    const entry = JSON.parse(lines[0]!.trim());
+    const entry = JSON.parse(lines[0] ?? "");
     assert.strictEqual(entry.message, "check fields");
     assert.strictEqual(entry.agentId, "agent-2");
     assert.strictEqual(entry.agentRole, "reconciler");
@@ -108,7 +108,7 @@ describe("Logger — NDJSON format", () => {
     const logger = createLogger("agent-3", "root-planner");
     logger.warn("with data", { retries: 3, branch: "feat/x" });
 
-    const entry = JSON.parse(lines[0]!.trim());
+    const entry = JSON.parse(lines[0] ?? "");
     assert.deepStrictEqual(entry.data, { retries: 3, branch: "feat/x" });
   });
 
@@ -131,7 +131,7 @@ describe("Logger — NDJSON format", () => {
     logger.info("loud");
 
     assert.strictEqual(lines.length, 1);
-    assert.strictEqual(JSON.parse(lines[0]!.trim()).level, "info");
+    assert.strictEqual(JSON.parse(lines[0] ?? "").level, "info");
   });
 
   it("suppresses debug+info output when level=warn", () => {
@@ -156,7 +156,7 @@ describe("Logger — NDJSON format", () => {
     logger.error("e");
 
     assert.strictEqual(lines.length, 1);
-    assert.strictEqual(JSON.parse(lines[0]!.trim()).level, "error");
+    assert.strictEqual(JSON.parse(lines[0] ?? "").level, "error");
   });
 });
 
@@ -194,7 +194,7 @@ describe("Logger — withTask context tagging", () => {
     const logger = createLogger("agent-8", "worker").withTask("task-abc-123");
     logger.info("tagged entry");
 
-    const entry = JSON.parse(lines[0]!.trim());
+    const entry = JSON.parse(lines[0] ?? "");
     assert.strictEqual(entry.taskId, "task-abc-123");
   });
 
@@ -202,7 +202,7 @@ describe("Logger — withTask context tagging", () => {
     const logger = createLogger("agent-9", "subplanner");
     logger.info("no task");
 
-    const entry = JSON.parse(lines[0]!.trim());
+    const entry = JSON.parse(lines[0] ?? "");
     assert.strictEqual(entry.taskId, undefined);
   });
 
@@ -213,8 +213,8 @@ describe("Logger — withTask context tagging", () => {
     base.info("base log");
     tagged.info("tagged log");
 
-    const baseEntry = JSON.parse(lines[0]!.trim());
-    const taggedEntry = JSON.parse(lines[1]!.trim());
+    const baseEntry = JSON.parse(lines[0] ?? "");
+    const taggedEntry = JSON.parse(lines[1] ?? "");
 
     assert.strictEqual(baseEntry.taskId, undefined);
     assert.strictEqual(taggedEntry.taskId, "task-xyz");
@@ -376,19 +376,19 @@ describe("git — getRecentCommits", () => {
     seedCommit(dir, "third.txt", "3");
 
     const commits = await getRecentCommits(3, dir);
-    assert.match(commits[0]!.message, /add third/);
-    assert.match(commits[1]!.message, /add second/);
-    assert.match(commits[2]!.message, /add first/);
+    assert.match(commits[0]?.message ?? "", /add third/);
+    assert.match(commits[1]?.message ?? "", /add second/);
+    assert.match(commits[2]?.message ?? "", /add first/);
   });
 
   it("each commit has hash (40 chars), message, author, and ms timestamp", async () => {
     seedCommit(dir);
     const [c] = await getRecentCommits(1, dir);
 
-    assert.strictEqual(c!.hash.length, 40, "hash should be full SHA-1");
-    assert.ok(c!.message.length > 0, "message must not be empty");
-    assert.strictEqual(c!.author, "Longshot Test");
-    assert.ok(c!.date > 1_000_000_000_000, "date should be in milliseconds");
+    assert.strictEqual((c?.hash ?? "").length, 40, "hash should be full SHA-1");
+    assert.ok((c?.message ?? "").length > 0, "message must not be empty");
+    assert.strictEqual(c?.author ?? "", "Longshot Test");
+    assert.ok((c?.date ?? 0) > 1_000_000_000_000, "date should be in milliseconds");
   });
 });
 
