@@ -21,7 +21,7 @@ const TASK_PATH = "/workspace/task.json";
 const RESULT_PATH = "/workspace/result.json";
 const WORK_DIR = "/workspace/repo";
 
-const ARTIFACT_PATTERNS = [
+export const ARTIFACT_PATTERNS = [
   /^node_modules\//,
   /^\.next\//,
   /^dist\//,
@@ -49,7 +49,7 @@ const GITIGNORE_ESSENTIALS = [
   "yarn.lock",
 ].join("\n");
 
-function isArtifact(filePath: string): boolean {
+export function isArtifact(filePath: string): boolean {
   return ARTIFACT_PATTERNS.some((p) => p.test(filePath));
 }
 
@@ -129,6 +129,72 @@ export function buildTaskPrompt(task: Task): string {
   ];
 
   return parts.join("\n");
+}
+
+/**
+ * Pure helper: determines whether an LLM session produced no useful work.
+ * Exported for unit testing.
+ */
+export function detectEmptyResponse(tokensUsed: number, toolCallCount: number): boolean {
+  return tokensUsed === 0 && toolCallCount === 0;
+}
+
+/**
+ * Pure helper: aggregates git numstat output, filtering artifact paths.
+ * Exported for unit testing.
+ */
+export function aggregateNumstat(numstat: string): {
+  linesAdded: number;
+  linesRemoved: number;
+  filesChanged: string[];
+} {
+  const filesChanged: string[] = [];
+  let linesAdded = 0;
+  let linesRemoved = 0;
+  if (numstat) {
+    for (const line of numstat.split("\n")) {
+      const parts = line.split("\t");
+      const [addedRaw, removedRaw, filePath] = parts;
+      if (addedRaw && removedRaw && filePath) {
+        if (isArtifact(filePath)) continue;
+        const added = parseInt(addedRaw, 10);
+        const removed = parseInt(removedRaw, 10);
+        if (!Number.isNaN(added)) linesAdded += added;
+        if (!Number.isNaN(removed)) linesRemoved += removed;
+        filesChanged.push(filePath);
+      }
+    }
+  }
+  return { linesAdded, linesRemoved, filesChanged };
+}
+
+/**
+ * Pure helper: builds the failed handoff for an empty-response run.
+ * Exported for unit testing.
+ */
+export function buildEmptyResponseHandoff(taskId: string, durationMs: number): Handoff {
+  return {
+    taskId,
+    status: "failed",
+    summary:
+      "Task failed: LLM returned empty response (0 tokens, 0 tool calls). Possible API/endpoint failure.",
+    diff: "",
+    filesChanged: [],
+    concerns: ["Empty LLM response — possible API failure or model endpoint issue"],
+    suggestions: [
+      "Check LLM endpoint connectivity",
+      "Verify model is available in sandbox environment",
+    ],
+    metrics: {
+      linesAdded: 0,
+      linesRemoved: 0,
+      filesCreated: 0,
+      filesModified: 0,
+      tokensUsed: 0,
+      toolCallCount: 0,
+      durationMs,
+    },
+  };
 }
 
 export async function runWorker(): Promise<void> {

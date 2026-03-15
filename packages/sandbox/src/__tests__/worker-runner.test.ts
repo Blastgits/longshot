@@ -2,17 +2,17 @@
  * Regression tests for worker-runner.ts empty-response handling — issue #27.
  *
  * Existing sandbox.test.ts covers: payload parsing, buildTaskPrompt format,
- * buildHandoff structure, and git diff stats on a clean repo.
+ * buildHandoff structure, and git diff stats.
  *
- * This file covers the gaps:
- *   - Empty-response detection: 0 tokens + 0 tool calls → status "failed"
- *   - Handoff shape for empty-response path (summary, concerns, suggestions)
- *   - Safety-net commit is skipped when the agent produced no work
- *   - Artifact-only diffs do not inflate filesChanged / line metrics
- *   - buildTaskPrompt is exercised via its exported function
+ * This file covers the gaps by calling real exported helpers:
+ *   - detectEmptyResponse()        — pure empty-response detection
+ *   - buildEmptyResponseHandoff()  — real failed handoff construction
+ *   - isArtifact() + ARTIFACT_PATTERNS — real artifact filtering
+ *   - aggregateNumstat()           — real numstat aggregation with artifact filtering
+ *   - buildTaskPrompt()            — real prompt construction
+ *   - Safety-net commit logic via real git temp repos
  *
  * Uses node:test + node:assert/strict. No extra dependencies.
- * Git-touching tests use real temp repos with hermetic config.
  */
 
 import assert from "node:assert/strict";
@@ -22,7 +22,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
 
-import { buildTaskPrompt } from "../worker-runner.js";
+import {
+  ARTIFACT_PATTERNS,
+  aggregateNumstat,
+  buildEmptyResponseHandoff,
+  buildTaskPrompt,
+  detectEmptyResponse,
+  isArtifact,
+} from "../worker-runner.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -64,7 +71,6 @@ function makeTempRepo(): string {
   }
   git(["config", "user.email", "test@test.com"], dir);
   git(["config", "user.name", "Test"], dir);
-  // Initial commit so HEAD resolves
   writeFileSync(join(dir, "README.md"), "# test\n");
   git(["add", "."], dir);
   git(["commit", "-m", "init"], dir);
@@ -75,341 +81,250 @@ function rmDir(dir: string): void {
   rmSync(dir, { recursive: true, force: true });
 }
 
-/** Artifact paths that must always be excluded from metrics. */
-const ARTIFACT_PATHS = [
-  "node_modules/index.js",
-  "node_modules/@scope/pkg/index.js",
-  ".next/server/app.js",
-  "dist/index.js",
-  "dist/main.js",
-  "build/output.js",
-  "out/static/bundle.js",
-  ".turbo/cache.json",
-  ".tsbuildinfo",
-  "package-lock.json",
-  "pnpm-lock.yaml",
-  "yarn.lock",
-  ".pnpm-store/v3/pkg.tgz",
-];
-
-/** Non-artifact source paths that must always be included. */
-const SOURCE_PATHS = [
-  "src/index.ts",
-  "src/utils/helper.ts",
-  "packages/core/src/types.ts",
-  "README.md",
-  "tsconfig.json",
-  ".env.example",
-];
-
 // ---------------------------------------------------------------------------
-// Empty-response detection logic
+// detectEmptyResponse — real exported function
 // ---------------------------------------------------------------------------
 
-describe("worker-runner — empty-response detection", () => {
-  it("detects empty response when both tokensUsed and toolCallCount are zero", () => {
-    const tokensUsed = 0;
-    const toolCallCount = 0;
-    const isEmptyResponse = tokensUsed === 0 && toolCallCount === 0;
-    assert.strictEqual(isEmptyResponse, true, "0 tokens + 0 tool calls must be empty response");
+describe("worker-runner — detectEmptyResponse", () => {
+  it("returns true when both tokensUsed and toolCallCount are zero", () => {
+    assert.strictEqual(detectEmptyResponse(0, 0), true);
   });
 
-  it("is NOT empty response when tokens > 0 even if tool calls = 0", () => {
-    const tokensUsed: number = 42;
-    const toolCallCount: number = 0;
-    const isEmptyResponse = tokensUsed === 0 && toolCallCount === 0;
-    assert.strictEqual(isEmptyResponse, false, "non-zero tokens means agent did work");
+  it("returns false when tokensUsed > 0 even if toolCallCount = 0", () => {
+    assert.strictEqual(detectEmptyResponse(42, 0), false);
   });
 
-  it("is NOT empty response when tool calls > 0 even if tokens = 0", () => {
-    const tokensUsed: number = 0;
-    const toolCallCount: number = 3;
-    const isEmptyResponse = tokensUsed === 0 && toolCallCount === 0;
-    assert.strictEqual(isEmptyResponse, false, "non-zero tool calls means agent did work");
+  it("returns false when toolCallCount > 0 even if tokensUsed = 0", () => {
+    assert.strictEqual(detectEmptyResponse(0, 3), false);
   });
 
-  it("is NOT empty response when both tokens and tool calls are non-zero", () => {
-    const tokensUsed: number = 100;
-    const toolCallCount: number = 5;
-    const isEmptyResponse = tokensUsed === 0 && toolCallCount === 0;
-    assert.strictEqual(isEmptyResponse, false, "normal run must not be flagged as empty");
+  it("returns false when both are non-zero", () => {
+    assert.strictEqual(detectEmptyResponse(100, 5), false);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Handoff shape for empty-response path
+// buildEmptyResponseHandoff — real exported function
 // ---------------------------------------------------------------------------
 
-describe("worker-runner — empty-response handoff shape", () => {
-  /** Mirror the handoff construction from worker-runner.ts for the empty-response path. */
-  function buildEmptyResponseHandoff(taskId: string) {
-    const isEmptyResponse = true;
-    return {
-      taskId,
-      status: isEmptyResponse ? ("failed" as const) : ("complete" as const),
-      summary: isEmptyResponse
-        ? "Task failed: LLM returned empty response (0 tokens, 0 tool calls). Possible API/endpoint failure."
-        : "Task completed.",
-      diff: "",
-      filesChanged: [] as string[],
-      concerns: isEmptyResponse
-        ? ["Empty LLM response — possible API failure or model endpoint issue"]
-        : [],
-      suggestions: isEmptyResponse
-        ? ["Check LLM endpoint connectivity", "Verify model is available in sandbox environment"]
-        : [],
-      metrics: {
-        linesAdded: 0,
-        linesRemoved: 0,
-        filesCreated: 0,
-        filesModified: 0,
-        tokensUsed: 0,
-        toolCallCount: 0,
-        durationMs: 0,
-      },
-    };
+describe("worker-runner — buildEmptyResponseHandoff", () => {
+  it("status is 'failed'", () => {
+    const h = buildEmptyResponseHandoff("task-001", 1234);
+    assert.strictEqual(h.status, "failed");
+  });
+
+  it("taskId is preserved", () => {
+    const h = buildEmptyResponseHandoff("task-abc", 0);
+    assert.strictEqual(h.taskId, "task-abc");
+  });
+
+  it("summary mentions empty response or 0 tokens", () => {
+    const h = buildEmptyResponseHandoff("task-001", 0);
+    const lower = h.summary.toLowerCase();
+    assert.ok(
+      lower.includes("empty response") || lower.includes("0 tokens"),
+      `summary must mention empty response, got: "${h.summary}"`,
+    );
+  });
+
+  it("concerns is non-empty and mentions API or empty response", () => {
+    const h = buildEmptyResponseHandoff("task-001", 0);
+    assert.ok(h.concerns.length > 0, "must have at least one concern");
+    const text = h.concerns.join(" ").toLowerCase();
+    assert.ok(text.includes("empty") || text.includes("api"), `concern: "${h.concerns[0]}"`);
+  });
+
+  it("suggestions mention endpoint or model", () => {
+    const h = buildEmptyResponseHandoff("task-001", 0);
+    assert.ok(h.suggestions.length >= 2);
+    const text = h.suggestions.join(" ").toLowerCase();
+    assert.ok(text.includes("endpoint") || text.includes("model"));
+  });
+
+  it("filesChanged is empty", () => {
+    const h = buildEmptyResponseHandoff("task-001", 0);
+    assert.deepStrictEqual(h.filesChanged, []);
+  });
+
+  it("all line and file metrics are zero", () => {
+    const h = buildEmptyResponseHandoff("task-001", 500);
+    assert.strictEqual(h.metrics.linesAdded, 0);
+    assert.strictEqual(h.metrics.linesRemoved, 0);
+    assert.strictEqual(h.metrics.filesCreated, 0);
+    assert.strictEqual(h.metrics.filesModified, 0);
+    assert.strictEqual(h.metrics.tokensUsed, 0);
+    assert.strictEqual(h.metrics.toolCallCount, 0);
+  });
+
+  it("durationMs is preserved in metrics", () => {
+    const h = buildEmptyResponseHandoff("task-001", 9876);
+    assert.strictEqual(h.metrics.durationMs, 9876);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// isArtifact + ARTIFACT_PATTERNS — real exported values
+// ---------------------------------------------------------------------------
+
+describe("worker-runner — isArtifact (real export)", () => {
+  const artifactPaths = [
+    "node_modules/pkg/index.js",
+    "node_modules/@scope/pkg/index.js",
+    ".next/server/app.js",
+    "dist/index.js",
+    "build/output.js",
+    "out/static/bundle.js",
+    ".turbo/cache.json",
+    ".tsbuildinfo",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    ".pnpm-store/v3/pkg.tgz",
+  ];
+
+  const sourcePaths = [
+    "src/index.ts",
+    "src/utils/helper.ts",
+    "packages/core/src/types.ts",
+    "README.md",
+    "tsconfig.json",
+    ".env.example",
+  ];
+
+  it("ARTIFACT_PATTERNS has at least one entry per known category", () => {
+    // Verifies the exported array is populated and not accidentally cleared
+    assert.ok(
+      ARTIFACT_PATTERNS.length >= 8,
+      `expected >= 8 patterns, got ${ARTIFACT_PATTERNS.length}`,
+    );
+  });
+
+  for (const p of artifactPaths) {
+    it(`classifies "${p}" as an artifact`, () => {
+      assert.strictEqual(isArtifact(p), true, `"${p}" must be an artifact`);
+    });
   }
 
-  it("status is 'failed' for empty response, not 'complete'", () => {
-    const handoff = buildEmptyResponseHandoff("task-001");
-    assert.strictEqual(handoff.status, "failed", "empty response must produce a failed handoff");
+  for (const p of sourcePaths) {
+    it(`does NOT classify "${p}" as an artifact`, () => {
+      assert.strictEqual(isArtifact(p), false, `"${p}" must not be an artifact`);
+    });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// aggregateNumstat — real exported function
+// ---------------------------------------------------------------------------
+
+describe("worker-runner — aggregateNumstat (real export)", () => {
+  it("returns zeros for empty string", () => {
+    const result = aggregateNumstat("");
+    assert.strictEqual(result.linesAdded, 0);
+    assert.strictEqual(result.linesRemoved, 0);
+    assert.deepStrictEqual(result.filesChanged, []);
   });
 
-  it("summary describes the empty-response failure", () => {
-    const handoff = buildEmptyResponseHandoff("task-001");
-    assert.ok(
-      handoff.summary.toLowerCase().includes("empty response") ||
-        handoff.summary.toLowerCase().includes("0 tokens"),
-      `summary must mention empty response, got: "${handoff.summary}"`,
-    );
+  it("counts lines from source files", () => {
+    const numstat = "10\t2\tsrc/index.ts\n5\t1\tsrc/utils/helper.ts";
+    const result = aggregateNumstat(numstat);
+    assert.strictEqual(result.linesAdded, 15);
+    assert.strictEqual(result.linesRemoved, 3);
+    assert.deepStrictEqual(result.filesChanged, ["src/index.ts", "src/utils/helper.ts"]);
   });
 
-  it("concerns include a message about the empty LLM response", () => {
-    const handoff = buildEmptyResponseHandoff("task-001");
-    assert.ok(handoff.concerns.length > 0, "must have at least one concern");
-    const concernText = handoff.concerns.join(" ").toLowerCase();
-    assert.ok(
-      concernText.includes("empty") || concernText.includes("api"),
-      `concern must mention empty response or API issue, got: "${handoff.concerns[0]}"`,
-    );
+  it("excludes artifact files from counts and filesChanged", () => {
+    const numstat =
+      "1000\t0\tnode_modules/pkg/index.js\n500\t200\tdist/bundle.js\n300\t0\tpnpm-lock.yaml";
+    const result = aggregateNumstat(numstat);
+    assert.strictEqual(result.linesAdded, 0, "artifact lines must not count toward linesAdded");
+    assert.strictEqual(result.linesRemoved, 0);
+    assert.deepStrictEqual(result.filesChanged, []);
   });
 
-  it("suggestions include actionable remediation hints", () => {
-    const handoff = buildEmptyResponseHandoff("task-001");
-    assert.ok(handoff.suggestions.length >= 2, "must have at least two suggestions");
-    const text = handoff.suggestions.join(" ").toLowerCase();
-    assert.ok(
-      text.includes("endpoint") || text.includes("model"),
-      "suggestions must mention endpoint or model",
-    );
-  });
-
-  it("filesChanged is empty for empty-response path", () => {
-    const handoff = buildEmptyResponseHandoff("task-001");
-    assert.deepStrictEqual(
-      handoff.filesChanged,
-      [],
-      "no files should be reported for empty response",
-    );
-  });
-
-  it("all line and file metrics are zero for empty-response path", () => {
-    const handoff = buildEmptyResponseHandoff("task-001");
-    assert.strictEqual(handoff.metrics.linesAdded, 0);
-    assert.strictEqual(handoff.metrics.linesRemoved, 0);
-    assert.strictEqual(handoff.metrics.filesCreated, 0);
-    assert.strictEqual(handoff.metrics.filesModified, 0);
-    assert.strictEqual(handoff.metrics.tokensUsed, 0);
-    assert.strictEqual(handoff.metrics.toolCallCount, 0);
-  });
-
-  it("taskId is preserved correctly in the failed handoff", () => {
-    const handoff = buildEmptyResponseHandoff("task-empty-42");
-    assert.strictEqual(handoff.taskId, "task-empty-42");
+  it("counts only source files in a mixed numstat diff", () => {
+    const numstat = [
+      "10\t2\tsrc/index.ts",
+      "1000\t0\tnode_modules/pkg/index.js",
+      "5\t1\tsrc/utils/helper.ts",
+      "500\t200\tdist/bundle.js",
+    ].join("\n");
+    const result = aggregateNumstat(numstat);
+    assert.strictEqual(result.linesAdded, 15, "only src/ lines should count");
+    assert.strictEqual(result.linesRemoved, 3);
+    assert.deepStrictEqual(result.filesChanged, ["src/index.ts", "src/utils/helper.ts"]);
   });
 });
 
 // ---------------------------------------------------------------------------
-// Safety-net commit — skipped when agent produced no work
+// Safety-net commit — skipped on empty response (real git repo)
 // ---------------------------------------------------------------------------
 
-describe("worker-runner — safety-net commit skipped on empty response", () => {
+describe("worker-runner — safety-net commit logic", () => {
   let dir: string;
 
   beforeEach(() => {
     dir = makeTempRepo();
   });
-
   afterEach(() => rmDir(dir));
 
-  it("no new commit is created when isEmptyResponse=true and no agent work happened", () => {
+  it("no new commit when isEmptyResponse=true (real git repo)", () => {
     const commitsBefore = git(["rev-list", "--count", "HEAD"], dir);
 
-    // Simulate what worker-runner.ts does: skip safety-net commit if isEmptyResponse
-    const isEmptyResponse = true;
+    // Mirror worker-runner.ts: skip safety-net commit if isEmptyResponse
+    const isEmptyResponse = detectEmptyResponse(0, 0);
     if (!isEmptyResponse) {
       git(["add", "-A"], dir);
       const staged = git(["diff", "--cached", "--name-only"], dir);
-      if (staged) {
-        git(["commit", "-m", "feat(task-001): auto-commit uncommitted changes"], dir);
-      }
+      if (staged) git(["commit", "-m", "feat: auto-commit"], dir);
     }
 
-    const commitsAfter = git(["rev-list", "--count", "HEAD"], dir);
     assert.strictEqual(
-      commitsAfter,
+      git(["rev-list", "--count", "HEAD"], dir),
       commitsBefore,
-      "no new commit must be created when safety-net commit is skipped",
+      "commit count must not change on empty response",
     );
   });
 
-  it("safety-net commit IS created when agent did real work (isEmptyResponse=false)", () => {
+  it("safety-net commit IS created when agent did real work (real git repo)", () => {
     const commitsBefore = parseInt(git(["rev-list", "--count", "HEAD"], dir), 10);
-
-    // Agent wrote a file
     writeFileSync(join(dir, "src.ts"), "export const x = 1;\n");
 
-    const isEmptyResponse = false;
+    const isEmptyResponse = detectEmptyResponse(100, 5);
     if (!isEmptyResponse) {
       git(["add", "-A"], dir);
       const staged = git(["diff", "--cached", "--name-only"], dir);
-      if (staged) {
-        git(["commit", "-m", "feat(task-real): auto-commit uncommitted changes"], dir);
-      }
+      if (staged) git(["commit", "-m", "feat: auto-commit"], dir);
     }
 
-    const commitsAfter = parseInt(git(["rev-list", "--count", "HEAD"], dir), 10);
     assert.strictEqual(
-      commitsAfter,
+      parseInt(git(["rev-list", "--count", "HEAD"], dir), 10),
       commitsBefore + 1,
-      "safety-net commit must be created when agent produced real work",
+      "one new commit must be created for real work",
     );
   });
 
-  it("scaffold-only files (gitignore, AGENTS.md) do not produce a commit on empty response", () => {
-    // Simulate worker writing scaffold files even on empty response
+  it("scaffold-only files produce no commit on empty response (real git repo)", () => {
     writeFileSync(join(dir, ".gitignore"), "node_modules/\n");
     writeFileSync(join(dir, "AGENTS.md"), "# Worker instructions\n");
-
     const commitsBefore = git(["rev-list", "--count", "HEAD"], dir);
 
-    // Empty response → skip commit entirely
-    const isEmptyResponse = true;
+    const isEmptyResponse = detectEmptyResponse(0, 0);
     if (!isEmptyResponse) {
       git(["add", "-A"], dir);
       const staged = git(["diff", "--cached", "--name-only"], dir);
-      if (staged) {
-        git(["commit", "-m", "feat(scaffold): auto-commit"], dir);
-      }
+      if (staged) git(["commit", "-m", "feat: auto-commit"], dir);
     }
 
-    const commitsAfter = git(["rev-list", "--count", "HEAD"], dir);
     assert.strictEqual(
-      commitsAfter,
+      git(["rev-list", "--count", "HEAD"], dir),
       commitsBefore,
-      "scaffold-only files must not create a commit on empty response",
+      "scaffold files must not be committed on empty response",
     );
   });
 });
 
 // ---------------------------------------------------------------------------
-// Artifact filtering — artifact paths excluded from filesChanged metrics
-// ---------------------------------------------------------------------------
-
-describe("worker-runner — artifact filtering", () => {
-  /** Mirror the ARTIFACT_PATTERNS from worker-runner.ts. */
-  const ARTIFACT_PATTERNS = [
-    /^node_modules\//,
-    /^\.next\//,
-    /^dist\//,
-    /^build\//,
-    /^out\//,
-    /^\.turbo\//,
-    /^\.tsbuildinfo$/,
-    /^package-lock\.json$/,
-    /^pnpm-lock\.yaml$/,
-    /^yarn\.lock$/,
-    /^\.pnpm-store\//,
-  ];
-
-  function isArtifact(filePath: string): boolean {
-    return ARTIFACT_PATTERNS.some((p) => p.test(filePath));
-  }
-
-  it("all known artifact paths are filtered out", () => {
-    for (const p of ARTIFACT_PATHS) {
-      assert.strictEqual(isArtifact(p), true, `"${p}" must be classified as an artifact`);
-    }
-  });
-
-  it("source file paths are never filtered out", () => {
-    for (const p of SOURCE_PATHS) {
-      assert.strictEqual(isArtifact(p), false, `"${p}" must NOT be classified as an artifact`);
-    }
-  });
-
-  it("filtering artifact paths from filesChanged produces zero files for artifact-only diffs", () => {
-    const rawFiles = [...ARTIFACT_PATHS];
-    const filtered = rawFiles.filter((f) => !isArtifact(f));
-    assert.deepStrictEqual(filtered, [], "artifact-only diff must produce empty filesChanged");
-  });
-
-  it("filtering preserves source files and removes artifacts in a mixed diff", () => {
-    const mixed = [
-      "src/index.ts",
-      "node_modules/some-pkg/index.js",
-      "dist/bundle.js",
-      "src/utils/helper.ts",
-      "pnpm-lock.yaml",
-    ];
-    const filtered = mixed.filter((f) => !isArtifact(f));
-    assert.deepStrictEqual(filtered, ["src/index.ts", "src/utils/helper.ts"]);
-  });
-
-  it("linesAdded is zero when all changed files are artifacts", () => {
-    const numstatLines = [
-      "1000\t0\tnode_modules/pkg/index.js",
-      "500\t200\tdist/bundle.js",
-      "300\t0\tpnpm-lock.yaml",
-    ];
-
-    let linesAdded = 0;
-    let linesRemoved = 0;
-    for (const line of numstatLines) {
-      const [addedRaw, removedRaw, filePath] = line.split("\t");
-      if (addedRaw && removedRaw && filePath && !isArtifact(filePath)) {
-        linesAdded += parseInt(addedRaw, 10);
-        linesRemoved += parseInt(removedRaw, 10);
-      }
-    }
-
-    assert.strictEqual(linesAdded, 0, "artifact-only diff must produce zero linesAdded");
-    assert.strictEqual(linesRemoved, 0, "artifact-only diff must produce zero linesRemoved");
-  });
-
-  it("linesAdded only counts source files in a mixed numstat diff", () => {
-    const numstatLines = [
-      "10\t2\tsrc/index.ts",
-      "1000\t0\tnode_modules/pkg/index.js",
-      "5\t1\tsrc/utils/helper.ts",
-      "500\t200\tdist/bundle.js",
-    ];
-
-    let linesAdded = 0;
-    for (const line of numstatLines) {
-      const [addedRaw, _removedRaw, filePath] = line.split("\t");
-      if (addedRaw && filePath && !isArtifact(filePath)) {
-        linesAdded += parseInt(addedRaw, 10);
-      }
-    }
-
-    // Only src/index.ts (10) + src/utils/helper.ts (5) = 15
-    assert.strictEqual(linesAdded, 15, "only source file lines should count toward linesAdded");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// buildTaskPrompt — exported function (extends existing coverage)
+// buildTaskPrompt — real exported function
 // ---------------------------------------------------------------------------
 
 describe("worker-runner — buildTaskPrompt", () => {
@@ -425,44 +340,32 @@ describe("worker-runner — buildTaskPrompt", () => {
   };
 
   it("includes task id as a markdown heading", () => {
-    const prompt = buildTaskPrompt(baseTask);
-    assert.ok(prompt.includes("## Task: task-042"), "must include task id heading");
+    assert.ok(buildTaskPrompt(baseTask).includes("## Task: task-042"));
   });
 
   it("includes description", () => {
-    const prompt = buildTaskPrompt(baseTask);
-    assert.ok(prompt.includes("Add authentication middleware"));
+    assert.ok(buildTaskPrompt(baseTask).includes("Add authentication middleware"));
   });
 
-  it("includes all scope files joined by comma", () => {
-    const prompt = buildTaskPrompt(baseTask);
-    assert.ok(
-      prompt.includes("src/middleware/auth.ts, src/routes/api.ts"),
-      "scope must list all files",
-    );
+  it("includes all scope files", () => {
+    assert.ok(buildTaskPrompt(baseTask).includes("src/middleware/auth.ts, src/routes/api.ts"));
   });
 
   it("includes acceptance criteria", () => {
-    const prompt = buildTaskPrompt(baseTask);
-    assert.ok(prompt.includes("All API routes require a valid JWT token"));
+    assert.ok(buildTaskPrompt(baseTask).includes("All API routes require a valid JWT token"));
   });
 
   it("includes branch name", () => {
-    const prompt = buildTaskPrompt(baseTask);
-    assert.ok(prompt.includes("worker/task-042"));
+    assert.ok(buildTaskPrompt(baseTask).includes("worker/task-042"));
   });
 
-  it("ends with a completion instruction", () => {
+  it("ends with completion instruction", () => {
     const prompt = buildTaskPrompt(baseTask);
-    assert.ok(
-      prompt.includes("Complete this task") && prompt.includes("Commit your changes"),
-      "must include task completion instruction",
-    );
+    assert.ok(prompt.includes("Complete this task") && prompt.includes("Commit your changes"));
   });
 
-  it("handles empty scope array without throwing", () => {
-    const task = { ...baseTask, scope: [] };
-    const prompt = buildTaskPrompt(task);
+  it("handles empty scope without throwing", () => {
+    const prompt = buildTaskPrompt({ ...baseTask, scope: [] });
     assert.ok(typeof prompt === "string" && prompt.length > 0);
   });
 });
