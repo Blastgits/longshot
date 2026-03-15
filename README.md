@@ -12,15 +12,46 @@ The entire system is stateless. Workers are ephemeral, state lives only in Git, 
 
 ## Architecture
 
-```
-User request
-    └── Root Planner (LLM)
-            └── Subplanners (for large task scopes)
-                    └── Workers (parallel, up to MAX_WORKERS)
-                            └── Modal Sandboxes
-                                    └── Pi Coding Agent (@mariozechner/pi-coding-agent)
-                                            └── Merge Queue
-                                                    └── Reconciler (self-healing)
+```mermaid
+flowchart TD
+    User(["👤 User Request"])
+
+    subgraph Python["Python Layer"]
+        CLI["main.py\nCLI + Rich Dashboard"]
+    end
+
+    subgraph Node["Node.js Orchestrator"]
+        RP["Root Planner\n(LLM)"]
+        SP["Subplanner\n(LLM)"]
+        TQ[("Task Queue")]
+        MQ["Merge Queue\n(serial: rebase / ff / merge)"]
+        RC["Reconciler\n(build/test sweeps)"]
+        FN["Finalization"]
+    end
+
+    subgraph Cloud["Modal Cloud Sandboxes (parallel)"]
+        W1["Worker"]
+        W2["Worker"]
+        W3["Worker"]
+        WN["Worker …"]
+    end
+
+    User --> CLI
+    CLI -->|"spawns subprocess"| RP
+    CLI <-->|"NDJSON stdout (4 Hz)"| Node
+
+    RP -->|"large tasks"| SP
+    RP --> TQ
+    SP --> TQ
+
+    TQ --> W1 & W2 & W3 & WN
+
+    W1 & W2 & W3 & WN -->|"result.json\n+ git branch push"| MQ
+
+    MQ -->|"conflict → new fix task"| TQ
+    MQ --> RC
+    RC -->|"fix tasks"| TQ
+    RC --> FN
 ```
 
 **Three TypeScript packages** (scope `@longshot/*`):
@@ -30,6 +61,10 @@ User request
 - `packages/sandbox` — Modal sandbox definition and worker harness
 
 **Python layer** (`main.py`, `dashboard.py`) wraps the Node orchestrator with a human-readable CLI and optional Rich TUI dashboard.
+
+**Python is a pure display layer.** `main.py` spawns the Node orchestrator and reads its NDJSON stdout to render the dashboard at 4Hz.
+
+**NDJSON is the universal bus.** Every status update, task event, and result flows as newline-delimited JSON from the orchestrator to the dashboard.
 
 **Modal** currently provides the cloud sandboxes. Each worker runs in a fully isolated container with its own clone of the target repository.
 
@@ -56,7 +91,7 @@ Longshot already runs parallel planning and execution across isolated workers. T
 #### User-provided references
 
 - [Why We Built Our Background Agent (Ramp)](https://builders.ramp.com/post/why-we-built-our-background-agent)
-- [Minions: Stripe’s one-shot, end-to-end coding agents](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)
+- [Minions: Stripe's one-shot, end-to-end coding agents](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents)
 - [Minions Part 2 (Stripe)](https://stripe.dev/blog/minions-stripes-one-shot-end-to-end-coding-agents-part-2)
 - [The Self-Driving Codebase — Background Agents and the Next Era of Enterprise Software Delivery](https://background-agents.com/)
 - [The third era of AI software development (Cursor)](https://cursor.com/blog/third-era)
