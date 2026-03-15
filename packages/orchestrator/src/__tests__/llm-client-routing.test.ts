@@ -15,12 +15,6 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { LLMClient } from "../llm-client.js";
 
 // ---------------------------------------------------------------------------
-// Constants mirrored from llm-client.ts (kept in sync manually)
-// ---------------------------------------------------------------------------
-const UNHEALTHY_THRESHOLD = 3; // consecutive failures before demotion
-const RECOVERY_PROBE_MS = 30_000; // ms before an unhealthy endpoint gets a probe
-
-// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -45,12 +39,7 @@ function successFetch(content = "ok"): typeof fetch {
   };
 }
 
-/** A fetch stub that always returns an HTTP error. */
-function _errorFetch(status = 500): typeof fetch {
-  return async () => new Response("error", { status });
-}
-
-/** Build a two-endpoint client with controllable fetch. */
+/** Build a two-endpoint client (primary w=80, secondary w=20). */
 function makeTwoEndpointClient(timeoutMs = 1000): LLMClient {
   return new LLMClient({
     endpoints: [
@@ -77,33 +66,44 @@ describe("LLMClient — health tracking: endpoint demotion", () => {
     client = makeTwoEndpointClient();
   });
 
-  it("endpoint stays healthy before UNHEALTHY_THRESHOLD failures", async () => {
-    let callCount = 0;
+  it("endpoint stays healthy after two consecutive failures (below threshold of 3)", async () => {
+    // Pin Math.random so primary (weight=80) is always selected first.
+    // With random=0.5, pick=40 of 100 → skips primary(80) would not work;
+    // actually with [primary=80, secondary=20]: pick=0.5*100=50 → subtract primary(80): 50-80<0
+    // so primary IS selected. Let's use 0.5 to consistently hit primary.
+    Math.random = () => 0.5;
+
+    let primaryCallCount = 0;
     globalThis.fetch = async (input) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("primary")) {
-        callCount++;
-        // Fail only the first two calls (below threshold)
-        if (callCount < UNHEALTHY_THRESHOLD) {
-          return new Response("err", { status: 500 });
-        }
+        primaryCallCount++;
+        return new Response("err", { status: 500 });
       }
       return successFetch()(input);
     };
 
-    // Two failures on primary — still healthy, should succeed via secondary
-    await client.complete(MESSAGES).catch(() => {});
-    await client.complete(MESSAGES).catch(() => {});
+    // Two failures on primary — falls back to secondary each time
+    await client.complete(MESSAGES);
+    await client.complete(MESSAGES);
+
+    // Primary was tried (and failed) exactly twice
+    assert.strictEqual(primaryCallCount, 2, "primary should have been tried exactly twice");
 
     const stats = client.getEndpointStats();
     const primary = stats.find((s) => s.name === "primary");
     assert.ok(primary, "primary endpoint must exist in stats");
-    assert.strictEqual(primary.healthy, true, "primary should still be healthy below threshold");
+    assert.strictEqual(primary.totalFailures, 2, "primary should have exactly 2 recorded failures");
+    assert.strictEqual(
+      primary.healthy,
+      true,
+      "primary should still be healthy below threshold of 3",
+    );
   });
 
-  it(`marks endpoint unhealthy after ${UNHEALTHY_THRESHOLD} consecutive failures`, async () => {
-    // Route all requests to primary first (Math.random = 0 picks highest-weight first)
-    Math.random = () => 0;
+  it("marks endpoint unhealthy after 3 consecutive failures (at threshold)", async () => {
+    // Math.random=0.5 → pick=50 of 100 → primary(80) is always selected first
+    Math.random = () => 0.5;
 
     globalThis.fetch = async (input) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -111,9 +111,9 @@ describe("LLMClient — health tracking: endpoint demotion", () => {
       return successFetch()(input);
     };
 
-    // Drive UNHEALTHY_THRESHOLD failures on primary
-    for (let i = 0; i < UNHEALTHY_THRESHOLD; i++) {
-      await client.complete(MESSAGES).catch(() => {});
+    // Drive 3 consecutive failures on primary
+    for (let i = 0; i < 3; i++) {
+      await client.complete(MESSAGES);
     }
 
     const stats = client.getEndpointStats();
@@ -122,61 +122,67 @@ describe("LLMClient — health tracking: endpoint demotion", () => {
     assert.strictEqual(
       primary.healthy,
       false,
-      "primary must be marked unhealthy after threshold failures",
+      "primary must be marked unhealthy after 3 consecutive failures",
     );
     assert.ok(
-      primary.totalFailures >= UNHEALTHY_THRESHOLD,
-      "totalFailures must reflect recorded failures",
+      primary.totalFailures >= 3,
+      "totalFailures must reflect at least 3 recorded failures",
     );
   });
 
-  it("resets consecutive failure count on a successful request", async () => {
-    Math.random = () => 0;
-    let callCount = 0;
+  it("resets to healthy after a successful request following two failures", async () => {
+    // Math.random=0.5 → primary always selected first
+    Math.random = () => 0.5;
+    let primaryCallCount = 0;
 
     globalThis.fetch = async (input) => {
       const url = typeof input === "string" ? input : input.toString();
       if (url.includes("primary")) {
-        callCount++;
-        // Fail twice then succeed
-        if (callCount <= 2) return new Response("err", { status: 500 });
+        primaryCallCount++;
+        // Fail first two calls, succeed on third
+        if (primaryCallCount <= 2) return new Response("err", { status: 500 });
       }
       return successFetch()(input);
     };
 
-    // Two failures (below threshold)
-    await client.complete(MESSAGES).catch(() => {});
-    await client.complete(MESSAGES).catch(() => {});
-    // One success on primary
+    // Two failures — falls back to secondary
     await client.complete(MESSAGES);
+    await client.complete(MESSAGES);
+    // Third call succeeds on primary
+    const result = await client.complete(MESSAGES);
 
-    const stats = client.getEndpointStats();
-    const primary = stats.find((s) => s.name === "primary");
+    assert.strictEqual(result.endpoint, "primary", "third call should succeed on primary");
+
+    const primary = client.getEndpointStats().find((s) => s.name === "primary");
     assert.ok(primary);
-    assert.strictEqual(primary.healthy, true, "primary should be healthy after a success");
+    assert.strictEqual(
+      primary.healthy,
+      true,
+      "primary should be healthy after a successful request",
+    );
   });
 
   it("demoted endpoint is tried last (after healthy endpoints)", async () => {
-    Math.random = () => 0;
+    // Math.random=0.5 → primary always selected first during demotion
+    Math.random = () => 0.5;
     const callOrder: string[] = [];
 
     globalThis.fetch = async (input) => {
       const url = typeof input === "string" ? input : input.toString();
       const name = url.includes("primary") ? "primary" : "secondary";
       callOrder.push(name);
-
       if (url.includes("primary")) return new Response("err", { status: 500 });
       return successFetch()(input);
     };
 
-    // Demote primary
-    for (let i = 0; i < UNHEALTHY_THRESHOLD; i++) {
-      await client.complete(MESSAGES).catch(() => {});
+    // Demote primary with 3 consecutive failures
+    for (let i = 0; i < 3; i++) {
+      await client.complete(MESSAGES);
     }
 
     callOrder.length = 0; // reset tracking
 
-    // Next call: secondary (healthy) should be tried before primary (unhealthy)
+    // After demotion: secondary (healthy) must be tried before primary (unhealthy)
     await client.complete(MESSAGES);
 
     assert.strictEqual(
@@ -188,12 +194,12 @@ describe("LLMClient — health tracking: endpoint demotion", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Recovery probe after RECOVERY_PROBE_MS
+// Recovery probe after RECOVERY_PROBE_MS (30 000 ms)
 // ---------------------------------------------------------------------------
 
 describe("LLMClient — health tracking: recovery probe", () => {
   it("unhealthy endpoint is re-probed after RECOVERY_PROBE_MS and recovers on success", async () => {
-    Math.random = () => 0;
+    Math.random = () => 0.5; // pin primary first
 
     let now = Date.now();
     Date.now = () => now;
@@ -203,26 +209,25 @@ describe("LLMClient — health tracking: recovery probe", () => {
 
     globalThis.fetch = async (input) => {
       const url = typeof input === "string" ? input : input.toString();
-      if (url.includes("primary")) {
-        if (primaryShouldFail) return new Response("err", { status: 500 });
+      if (url.includes("primary") && primaryShouldFail) {
+        return new Response("err", { status: 500 });
       }
       return successFetch()(input);
     };
 
     // Demote primary
-    for (let i = 0; i < UNHEALTHY_THRESHOLD; i++) {
-      await client.complete(MESSAGES).catch(() => {});
+    for (let i = 0; i < 3; i++) {
+      await client.complete(MESSAGES);
     }
 
     const beforeRecovery = client.getEndpointStats().find((s) => s.name === "primary");
     assert.ok(beforeRecovery);
     assert.strictEqual(beforeRecovery.healthy, false, "primary should be unhealthy before probe");
 
-    // Advance clock past RECOVERY_PROBE_MS
-    now += RECOVERY_PROBE_MS + 1;
+    // Advance clock past RECOVERY_PROBE_MS (30 000 ms)
+    now += 30_001;
     primaryShouldFail = false;
 
-    // Next selectEndpoints() call will mark primary healthy for probe
     const result = await client.complete(MESSAGES);
 
     const afterRecovery = client.getEndpointStats().find((s) => s.name === "primary");
@@ -230,13 +235,13 @@ describe("LLMClient — health tracking: recovery probe", () => {
     assert.strictEqual(
       afterRecovery.healthy,
       true,
-      "primary should be healthy after recovery probe",
+      "primary should be healthy after successful recovery probe",
     );
     assert.ok(result.content.length > 0, "request should succeed after recovery");
   });
 
-  it("unhealthy endpoint is NOT probed before RECOVERY_PROBE_MS elapses", async () => {
-    Math.random = () => 0;
+  it("unhealthy endpoint is NOT re-probed before RECOVERY_PROBE_MS elapses", async () => {
+    Math.random = () => 0.5; // pin primary first
 
     let now = Date.now();
     Date.now = () => now;
@@ -250,20 +255,28 @@ describe("LLMClient — health tracking: recovery probe", () => {
     };
 
     // Demote primary
-    for (let i = 0; i < UNHEALTHY_THRESHOLD; i++) {
-      await client.complete(MESSAGES).catch(() => {});
+    for (let i = 0; i < 3; i++) {
+      await client.complete(MESSAGES);
     }
 
-    // Advance clock by less than RECOVERY_PROBE_MS
-    now += RECOVERY_PROBE_MS - 1000;
+    // Advance clock by less than RECOVERY_PROBE_MS (only 29 000 ms of the 30 000 ms window)
+    now += 29_000;
 
-    // Primary should still be unhealthy — secondary handles the request
+    // Primary is still unhealthy — secondary handles the request
     const result = await client.complete(MESSAGES);
-    assert.strictEqual(result.endpoint, "secondary");
+    assert.strictEqual(
+      result.endpoint,
+      "secondary",
+      "secondary must handle request before probe window",
+    );
 
-    const stats = client.getEndpointStats().find((s) => s.name === "primary");
-    assert.ok(stats);
-    assert.strictEqual(stats.healthy, false, "primary must still be unhealthy before probe window");
+    const primary = client.getEndpointStats().find((s) => s.name === "primary");
+    assert.ok(primary);
+    assert.strictEqual(
+      primary.healthy,
+      false,
+      "primary must still be unhealthy before probe window",
+    );
   });
 });
 
@@ -272,8 +285,10 @@ describe("LLMClient — health tracking: recovery probe", () => {
 // ---------------------------------------------------------------------------
 
 describe("LLMClient — weighted ordering (deterministic)", () => {
-  it("higher-weight endpoint is selected first when random = 0.1", async () => {
-    Math.random = () => 0.5; // pick=50 of 100 → skips light(10), lands on heavy(90)
+  it("higher-weight endpoint is selected first when random=0.5 (pick lands within its range)", async () => {
+    // Endpoints: [light=10, heavy=90]. totalWeight=100.
+    // random=0.5 → pick=50. Iterate: light(10): 50-10=40>0, skip. heavy(90): 40-90<0 → select heavy.
+    Math.random = () => 0.5;
     const callOrder: string[] = [];
 
     globalThis.fetch = async (input) => {
@@ -294,11 +309,17 @@ describe("LLMClient — weighted ordering (deterministic)", () => {
     });
 
     await client.complete(MESSAGES);
-    assert.strictEqual(callOrder[0], "heavy", "heavy (weight=90) must be selected first");
+    assert.strictEqual(
+      callOrder[0],
+      "heavy",
+      "heavy (weight=90) must be selected first when random=0.5",
+    );
   });
 
-  it("lower-weight endpoint is selected first when random forces it", async () => {
-    Math.random = () => 0; // pick=0 → immediately lands on first in array = light(10)
+  it("lower-weight endpoint is selected first when random=0 (pick=0 lands on first in array)", async () => {
+    // Endpoints: [light=10, heavy=90]. totalWeight=100.
+    // random=0 → pick=0. Iterate: light(10): 0-10<0 → select light immediately.
+    Math.random = () => 0;
     const callOrder: string[] = [];
 
     globalThis.fetch = async (input) => {
@@ -319,10 +340,15 @@ describe("LLMClient — weighted ordering (deterministic)", () => {
     });
 
     await client.complete(MESSAGES);
-    assert.strictEqual(callOrder[0], "light", "light must be selected first when random is high");
+    assert.strictEqual(
+      callOrder[0],
+      "light",
+      "light (weight=10) is selected first when random=0 picks first array element",
+    );
   });
 
   it("equal-weight endpoints: random=0 picks the first in declaration order", async () => {
+    // random=0 → pick=0 → immediately selects the first element (alpha)
     Math.random = () => 0;
     const callOrder: string[] = [];
 
@@ -351,7 +377,7 @@ describe("LLMClient — weighted ordering (deterministic)", () => {
     );
   });
 
-  it("getEndpointStats reflects effectiveWeight matches base weight before any latency data", () => {
+  it("effectiveWeight equals base weight before any requests (no latency data)", () => {
     const client = new LLMClient({
       endpoints: [
         { name: "a", endpoint: "https://a.example.com", weight: 60 },
@@ -367,9 +393,16 @@ describe("LLMClient — weighted ordering (deterministic)", () => {
     const b = stats.find((s) => s.name === "b");
     assert.ok(a);
     assert.ok(b);
-    // Before any requests, effectiveWeight equals base weight
-    assert.strictEqual(a.effectiveWeight, 60);
-    assert.strictEqual(b.effectiveWeight, 40);
+    assert.strictEqual(
+      a.effectiveWeight,
+      60,
+      "effectiveWeight must equal base weight before any requests",
+    );
+    assert.strictEqual(
+      b.effectiveWeight,
+      40,
+      "effectiveWeight must equal base weight before any requests",
+    );
   });
 });
 
@@ -379,14 +412,12 @@ describe("LLMClient — weighted ordering (deterministic)", () => {
 
 describe("LLMClient — latency-adaptive weighting", () => {
   it("faster endpoint gets a higher effectiveWeight than the slower one", async () => {
-    Math.random = () => 0;
+    const FAST_LATENCY = 100;
+    const SLOW_LATENCY = 500;
 
-    const _callIndex = 0;
-    const latencies = [100, 500]; // primary fast, secondary slow
-
-    globalThis.fetch = async (input, _init) => {
+    globalThis.fetch = async (input) => {
       const url = typeof input === "string" ? input : input.toString();
-      const delay = url.includes("primary") ? latencies[0]! : latencies[1]!;
+      const delay = url.includes("primary") ? FAST_LATENCY : SLOW_LATENCY;
       await new Promise((r) => setTimeout(r, delay));
       return successFetch()(input);
     };
@@ -403,11 +434,19 @@ describe("LLMClient — latency-adaptive weighting", () => {
     });
 
     // Seed latency data: one success on each endpoint
-    Math.random = () => 0;
-    await client.complete(MESSAGES); // hits primary (fast)
+    Math.random = () => 0.5; // pick=25 of 100 → primary(50): 25-50<0 → select primary
+    await client.complete(MESSAGES);
 
-    Math.random = () => 0.9999;
-    await client.complete(MESSAGES); // hits secondary (slow)
+    Math.random = () => 0; // pick=0 → primary(50): 0-50<0 → select primary again...
+    // Actually we need secondary to get latency data too.
+    // With [primary=50, secondary=50], random=0 → pick=0 → primary selected.
+    // Use random=0.6 → pick=30 of 100 → primary(50): 30-50<0 → still primary.
+    // Use random=0.99 → pick=49.5 of 100 → primary(50): 49.5-50<0 → primary.
+    // Hmm, with two equal weight 50 endpoints:
+    // random=X, pick=X*100. If pick <= 50, primary is selected (pick-50 <= 0).
+    // So we need pick > 50, i.e. random > 0.5 to select secondary.
+    Math.random = () => 0.51; // pick=51 → primary(50): 51-50=1>0, skip → secondary(50): 1-50<0 → select secondary
+    await client.complete(MESSAGES);
 
     const stats = client.getEndpointStats();
     const primary = stats.find((s) => s.name === "primary");
@@ -417,17 +456,15 @@ describe("LLMClient — latency-adaptive weighting", () => {
 
     assert.ok(
       primary.effectiveWeight > secondary.effectiveWeight,
-      `faster primary (${primary.effectiveWeight}) should have higher effectiveWeight than slower secondary (${secondary.effectiveWeight})`,
+      `faster primary (effectiveWeight=${primary.effectiveWeight}) should outweigh slower secondary (effectiveWeight=${secondary.effectiveWeight})`,
     );
   });
 
-  it("endpoint with no latency data keeps effectiveWeight equal to base weight", async () => {
-    Math.random = () => 0;
-
+  it("single endpoint keeps effectiveWeight equal to base weight (rebalancing skipped)", async () => {
     globalThis.fetch = successFetch();
 
     const client = new LLMClient({
-      endpoints: [{ name: "only", endpoint: "https://only.example.com", weight: 75 }],
+      endpoint: "https://only.example.com",
       model: "test-model",
       maxTokens: 10,
       temperature: 0,
@@ -437,28 +474,27 @@ describe("LLMClient — latency-adaptive weighting", () => {
     await client.complete(MESSAGES);
 
     const stats = client.getEndpointStats();
-    const only = stats.find((s) => s.name === "only");
+    const only = stats[0];
     assert.ok(only);
-    // Single endpoint — rebalanceWeights skips when healthyWithLatency.length < 2
+    // rebalanceWeights() requires >= 2 healthy endpoints with latency data — skipped here
     assert.strictEqual(
       only.effectiveWeight,
-      75,
-      "single endpoint effectiveWeight must stay at base weight",
+      100,
+      "single endpoint effectiveWeight must remain at base weight",
     );
   });
 
-  it("avgLatencyMs is updated via EMA after successful requests", async () => {
-    Math.random = () => 0;
+  it("avgLatencyMs converges toward new latency via EMA (alpha=0.3) after two requests", async () => {
     const ALPHA = 0.3;
     const FIRST_LATENCY = 200;
     const SECOND_LATENCY = 600;
 
-    let callCount = 0;
+    let requestCount = 0;
     globalThis.fetch = async () => {
-      callCount++;
-      const delay = callCount === 1 ? FIRST_LATENCY : SECOND_LATENCY;
+      requestCount++;
+      const delay = requestCount === 1 ? FIRST_LATENCY : SECOND_LATENCY;
       await new Promise((r) => setTimeout(r, delay));
-      return successFetch()(String(callCount));
+      return successFetch()(String(requestCount));
     };
 
     const client = new LLMClient({
@@ -469,21 +505,19 @@ describe("LLMClient — latency-adaptive weighting", () => {
       timeoutMs: 5000,
     });
 
-    await client.complete(MESSAGES); // sets avgLatency = FIRST_LATENCY (first call)
-    await client.complete(MESSAGES); // EMA update
+    await client.complete(MESSAGES); // first call: avgLatency = FIRST_LATENCY
+    await client.complete(MESSAGES); // second call: EMA update
 
-    const stats = client.getEndpointStats();
-    const ep = stats[0];
+    const ep = client.getEndpointStats()[0];
     assert.ok(ep);
 
-    // EMA after two calls: first sets avgLatency = FIRST_LATENCY, then:
-    // avgLatency = ALPHA * SECOND_LATENCY + (1 - ALPHA) * FIRST_LATENCY
+    // EMA: avgLatency = ALPHA * SECOND + (1 - ALPHA) * FIRST
     const expectedEMA = ALPHA * SECOND_LATENCY + (1 - ALPHA) * FIRST_LATENCY;
 
     // Allow ±50ms tolerance for timing variance in CI
     assert.ok(
       Math.abs(ep.avgLatencyMs - expectedEMA) < 50,
-      `avgLatencyMs (${ep.avgLatencyMs}) should be close to EMA (${Math.round(expectedEMA)}) ±50ms`,
+      `avgLatencyMs (${ep.avgLatencyMs}) should be within 50ms of EMA (${Math.round(expectedEMA)})`,
     );
   });
 });
