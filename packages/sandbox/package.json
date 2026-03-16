@@ -16,7 +16,7 @@
     "@mariozechner/pi-coding-agent": "^0.55.3"
   },
   "devDependencies": {
-    "@types/node": "^25.3.5",
+    "@types/node": "^25.5.0",
     "typescript": "^5.8.3"
   },
   "scripts": {
