@@ -134,6 +134,8 @@ brew install longshot
 longshot --version
 ```
 
+The canonical Homebrew tap currently remains under `andrewcai8/longshot`, even though the source repo and runtime release assets live under `Blastgits/longshot`.
+
 On first run, the CLI downloads a matching runtime bundle and installs Node runtime dependencies into a local cache (`~/.longshot/runtime/<version>` by default).
 
 Optional overrides:

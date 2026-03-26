@@ -15,7 +15,7 @@ Environment variables:
 
 Examples:
   scripts/setup-release.sh
-  scripts/setup-release.sh --repo andrewcai8/longshot --tap-repo andrewcai8/homebrew-longshot
+  scripts/setup-release.sh --repo Blastgits/longshot --tap-repo andrewcai8/homebrew-longshot
   HOMEBREW_TAP_TOKEN=ghp_xxx scripts/setup-release.sh
 EOF
 }
@@ -70,7 +70,11 @@ fi
 
 owner="${repo%%/*}"
 if [[ -z "$tap_repo" ]]; then
-  tap_repo="${owner}/homebrew-longshot"
+  if [[ "$repo" == "Blastgits/longshot" ]]; then
+    tap_repo="andrewcai8/homebrew-longshot"
+  else
+    tap_repo="${owner}/homebrew-longshot"
+  fi
 fi
 
 echo "Repository: ${repo}"

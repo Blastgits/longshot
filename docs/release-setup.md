@@ -2,6 +2,13 @@
 
 This runbook covers one-time setup and first release for public CLI distribution.
 
+Current ownership split:
+
+- Canonical code + runtime releases: `Blastgits/longshot`
+- Canonical Homebrew tap: `andrewcai8/homebrew-longshot` and `brew tap andrewcai8/longshot`
+
+Until a `Blastgits/homebrew-longshot` repo actually exists, keep the Homebrew instructions and release wiring pointed at `andrewcai8`.
+
 ## 1) One-time GitHub setup
 
 From repository root:
@@ -12,7 +19,7 @@ scripts/setup-release.sh
 
 What it does:
 
-- Ensures your Homebrew tap repo exists (`<owner>/homebrew-longshot` by default)
+- Ensures the canonical Homebrew tap repo exists (`andrewcai8/homebrew-longshot` by default for `Blastgits/longshot`)
 - Sets repository variable `HOMEBREW_TAP_REPO`
 - Sets repository variable `ENABLE_PUBLIC_RELEASE=false` (safe default, prevents accidental publishing)
 - Optionally sets `HOMEBREW_TAP_TOKEN` if provided via environment variable
@@ -26,7 +33,7 @@ HOMEBREW_TAP_TOKEN=<token> scripts/setup-release.sh
 Recommended token scope for `HOMEBREW_TAP_TOKEN`:
 
 - Fine-grained PAT
-- Repository access: only `<owner>/homebrew-longshot`
+- Repository access: only `andrewcai8/homebrew-longshot`
 - Permissions: **Contents: Read and write**
 
 ## 2) Configure PyPI trusted publishing
@@ -57,7 +64,7 @@ python -m build
 When you're ready for public distribution, enable publishing:
 
 ```bash
-gh variable set ENABLE_PUBLIC_RELEASE --repo <owner>/longshot --body true
+gh variable set ENABLE_PUBLIC_RELEASE --repo Blastgits/longshot --body true
 ```
 
 1. Bump `pyproject.toml` version.
@@ -89,7 +96,7 @@ longshot --version
 Homebrew:
 
 ```bash
-brew tap <owner>/longshot
+brew tap andrewcai8/longshot
 brew install longshot
 longshot --version
 ```
