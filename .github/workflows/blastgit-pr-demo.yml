@@ -34,7 +34,7 @@ jobs:
         with:
           node-version: 22
 
-      - name: Resolve PR metadata
+      - name: Resolve PR metadata and demo target
         id: meta
         uses: actions/github-script@v8
         with:
@@ -53,8 +53,73 @@ jobs:
               pull_number: prNumber,
             });
 
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            function normalizeCandidate(raw) {
+              let value = String(raw || '').replace(/\{[^}]*\}/g, ' ');
+              value = value.replace(/https?:\/\/\S+/g, ' ');
+              value = value.replace(/[<>]/g, ' ');
+              value = value.replace(/\s+/g, ' ').trim();
+              if (value.length < 12 || value.length > 100) return null;
+              if (!/[a-zA-Z]/.test(value)) return null;
+              if (value.split(/\s+/).length < 3) return null;
+              if (/^(const|let|var|import|export|return|if|for|while|class|function)\b/.test(value)) return null;
+              if (/[{};]/.test(value)) return null;
+              return value;
+            }
+
+            function extractCandidatesFromPatch(patch) {
+              if (!patch) return [];
+              const out = [];
+              for (const line of patch.split('\n')) {
+                if (!line.startsWith('+') || line.startsWith('+++')) continue;
+                const body = line.slice(1);
+
+                for (const match of body.matchAll(/>([^<>]{4,160})</g)) {
+                  const cleaned = normalizeCandidate(match[1]);
+                  if (cleaned) out.push(cleaned);
+                }
+
+                for (const match of body.matchAll(/["'`]([^"'`]{6,160})["'`]/g)) {
+                  const cleaned = normalizeCandidate(match[1]);
+                  if (cleaned) out.push(cleaned);
+                }
+              }
+              return out;
+            }
+
+            const landingTouched = files.some((f) => f.filename.startsWith('landing/'));
+            const demoPath = '/';
+            const demoSelector = '.hero__headline, .hero, h1';
+
+            const prioritizedFiles = landingTouched ? files.filter((f) => f.filename.startsWith('landing/')) : files;
+            const candidates = [];
+            for (const file of prioritizedFiles) {
+              for (const candidate of extractCandidatesFromPatch(file.patch)) {
+                candidates.push(candidate);
+              }
+            }
+
+            const seen = new Set();
+            const uniqueCandidates = candidates.filter((candidate) => {
+              const key = candidate.toLowerCase();
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+
+            const expectedText = uniqueCandidates[0] || '';
+
             core.setOutput('pr_number', String(prNumber));
             core.setOutput('pr_title', String(pr.title || ''));
+            core.setOutput('demo_path', demoPath);
+            core.setOutput('demo_selector', demoSelector);
+            core.setOutput('expected_text', expectedText);
 
       - name: Install landing dependencies
         working-directory: landing
@@ -89,11 +154,13 @@ jobs:
           cat /tmp/blastgit-demo-server.log || true
           exit 1
 
-      - name: Capture real UI demo
+      - name: Capture real UI demo (strict)
         working-directory: landing
         env:
           DEMO_URL: http://127.0.0.1:4173/
-          PR_TITLE: ${{ steps.meta.outputs.pr_title }}
+          DEMO_PATH: ${{ steps.meta.outputs.demo_path }}
+          DEMO_SELECTOR: ${{ steps.meta.outputs.demo_selector }}
+          DEMO_EXPECTED_TEXT: ${{ steps.meta.outputs.expected_text }}
           OUT_WEBM: ${{ github.workspace }}/pr-demo.webm
         shell: bash
         run: |
@@ -101,8 +168,20 @@ jobs:
           const fs = require("node:fs");
           const { chromium } = require("playwright");
 
+          function escapeRegex(text) {
+            return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          }
+
           (async () => {
             const outWebm = process.env.OUT_WEBM;
+            const baseUrl = process.env.DEMO_URL;
+            const demoPath = (process.env.DEMO_PATH || "/").trim();
+            const demoSelector = (process.env.DEMO_SELECTOR || "").trim();
+            const expectedText = (process.env.DEMO_EXPECTED_TEXT || "").trim();
+
+            const path = demoPath.startsWith("/") ? demoPath : `/${demoPath}`;
+            const targetUrl = new URL(path, baseUrl).toString();
+
             const browser = await chromium.launch({ headless: true });
             const context = await browser.newContext({
               viewport: { width: 1280, height: 720 },
@@ -111,12 +190,23 @@ jobs:
                 size: { width: 1280, height: 720 },
               },
             });
-            const page = await context.newPage();
-            await page.goto(process.env.DEMO_URL, { waitUntil: "domcontentloaded", timeout: 120000 });
-            await page.waitForTimeout(1500);
 
-            // Capture a visible, deterministic walkthrough (scroll + hovers).
-            await page.mouse.move(200, 120);
+            const page = await context.newPage();
+            await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+
+            if (demoSelector) {
+              await page.waitForSelector(demoSelector, { timeout: 20000 });
+            }
+            await page.waitForTimeout(900);
+
+            if (expectedText) {
+              const expectedLocator = page.getByText(new RegExp(escapeRegex(expectedText), "i")).first();
+              await expectedLocator.waitFor({ state: "visible", timeout: 15000 });
+              await expectedLocator.scrollIntoViewIfNeeded();
+              await page.waitForTimeout(900);
+            }
+
+            await page.mouse.move(220, 140);
             await page.waitForTimeout(300);
             await page.evaluate(() => window.scrollTo({ top: 420, behavior: "smooth" }));
             await page.waitForTimeout(1000);
@@ -132,14 +222,19 @@ jobs:
               await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
               await page.waitForTimeout(240);
             }
-            await page.waitForTimeout(1500);
+            await page.waitForTimeout(1200);
 
             const video = page.video();
             await context.close();
             await browser.close();
             if (!video) throw new Error("No video captured");
-            const path = await video.path();
-            fs.copyFileSync(path, outWebm);
+            const captured = await video.path();
+            fs.copyFileSync(captured, outWebm);
+
+            const size = fs.statSync(outWebm).size;
+            if (size < 120000) {
+              throw new Error(`Captured UI video was unexpectedly small (${size} bytes).`);
+            }
           })().catch((error) => {
             console.error(error);
             process.exit(1);
