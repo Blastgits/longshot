@@ -23,12 +23,20 @@ jobs:
     name: Render PR demo video
     if: github.event_name != 'pull_request' || github.event.action != 'closed' || github.event.pull_request.merged == true
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
 
     steps:
-      - name: Resolve PR metadata
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Resolve PR metadata and demo target
         id: meta
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const prNumberInput = core.getInput('pr_number');
@@ -45,20 +53,193 @@ jobs:
               pull_number: prNumber,
             });
 
-            const clean = (value, max = 120) => String(value || '').replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim().slice(0, max);
-            const state = pr.merged ? 'MERGED' : String(pr.state || 'open').toUpperCase();
-            const changed = Number(pr.changed_files || 0);
-            const additions = Number(pr.additions || 0);
-            const deletions = Number(pr.deletions || 0);
-            const headSha = String(pr.head?.sha || '').slice(0, 7) || 'unknown';
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number: prNumber,
+              per_page: 100,
+            });
+
+            function normalizeCandidate(raw) {
+              let value = String(raw || '').replace(/\{[^}]*\}/g, ' ');
+              value = value.replace(/https?:\/\/\S+/g, ' ');
+              value = value.replace(/[<>]/g, ' ');
+              value = value.replace(/\s+/g, ' ').trim();
+              if (value.length < 12 || value.length > 100) return null;
+              if (!/[a-zA-Z]/.test(value)) return null;
+              if (value.split(/\s+/).length < 3) return null;
+              if (/^(const|let|var|import|export|return|if|for|while|class|function)\b/.test(value)) return null;
+              if (/[{};]/.test(value)) return null;
+              return value;
+            }
+
+            function extractCandidatesFromPatch(patch) {
+              if (!patch) return [];
+              const out = [];
+              for (const line of patch.split('\n')) {
+                if (!line.startsWith('+') || line.startsWith('+++')) continue;
+                const body = line.slice(1);
+
+                for (const match of body.matchAll(/>([^<>]{4,160})</g)) {
+                  const cleaned = normalizeCandidate(match[1]);
+                  if (cleaned) out.push(cleaned);
+                }
+
+                for (const match of body.matchAll(/["'`]([^"'`]{6,160})["'`]/g)) {
+                  const cleaned = normalizeCandidate(match[1]);
+                  if (cleaned) out.push(cleaned);
+                }
+              }
+              return out;
+            }
+
+            const landingTouched = files.some((f) => f.filename.startsWith('landing/'));
+            const demoPath = '/';
+            const demoSelector = '.hero__headline, .hero, h1';
+
+            const prioritizedFiles = landingTouched ? files.filter((f) => f.filename.startsWith('landing/')) : files;
+            const candidates = [];
+            for (const file of prioritizedFiles) {
+              for (const candidate of extractCandidatesFromPatch(file.patch)) {
+                candidates.push(candidate);
+              }
+            }
+
+            const seen = new Set();
+            const uniqueCandidates = candidates.filter((candidate) => {
+              const key = candidate.toLowerCase();
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+
+            const expectedText = uniqueCandidates[0] || '';
 
             core.setOutput('pr_number', String(prNumber));
-            core.setOutput('line_repo', clean(`${owner}/${repo}`, 80));
-            core.setOutput('line_status', clean(`PR #${prNumber} ${state}`, 80));
-            core.setOutput('line_title', clean(pr.title, 150) || '(no title)');
-            core.setOutput('line_author', clean(`by @${pr.user?.login || 'unknown'}`, 80));
-            core.setOutput('line_stats', clean(`${changed} files  +${additions}  -${deletions}  sha ${headSha}`, 120));
-            core.setOutput('line_url', clean(pr.html_url, 180));
+            core.setOutput('pr_title', String(pr.title || ''));
+            core.setOutput('demo_path', demoPath);
+            core.setOutput('demo_selector', demoSelector);
+            core.setOutput('expected_text', expectedText);
+
+      - name: Install landing dependencies
+        working-directory: landing
+        shell: bash
+        run: |
+          npm ci
+          npm install --no-save playwright
+
+      - name: Install browser dependencies
+        working-directory: landing
+        shell: bash
+        run: |
+          npx playwright install --with-deps chromium
+
+      - name: Start landing dev server
+        working-directory: landing
+        shell: bash
+        run: |
+          npm run dev -- --host 127.0.0.1 --port 4173 > /tmp/blastgit-demo-server.log 2>&1 &
+          echo $! > /tmp/blastgit-demo-server.pid
+
+      - name: Wait for app
+        shell: bash
+        run: |
+          for i in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:4173/ >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Dev server never became ready"
+          cat /tmp/blastgit-demo-server.log || true
+          exit 1
+
+      - name: Capture real UI demo (strict)
+        working-directory: landing
+        env:
+          DEMO_URL: http://127.0.0.1:4173/
+          DEMO_PATH: ${{ steps.meta.outputs.demo_path }}
+          DEMO_SELECTOR: ${{ steps.meta.outputs.demo_selector }}
+          DEMO_EXPECTED_TEXT: ${{ steps.meta.outputs.expected_text }}
+          OUT_WEBM: ${{ github.workspace }}/pr-demo.webm
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const { chromium } = require("playwright");
+
+          function escapeRegex(text) {
+            return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          }
+
+          (async () => {
+            const outWebm = process.env.OUT_WEBM;
+            const baseUrl = process.env.DEMO_URL;
+            const demoPath = (process.env.DEMO_PATH || "/").trim();
+            const demoSelector = (process.env.DEMO_SELECTOR || "").trim();
+            const expectedText = (process.env.DEMO_EXPECTED_TEXT || "").trim();
+
+            const path = demoPath.startsWith("/") ? demoPath : `/${demoPath}`;
+            const targetUrl = new URL(path, baseUrl).toString();
+
+            const browser = await chromium.launch({ headless: true });
+            const context = await browser.newContext({
+              viewport: { width: 1280, height: 720 },
+              recordVideo: {
+                dir: process.cwd(),
+                size: { width: 1280, height: 720 },
+              },
+            });
+
+            const page = await context.newPage();
+            await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 120000 });
+
+            if (demoSelector) {
+              await page.waitForSelector(demoSelector, { timeout: 20000 });
+            }
+            await page.waitForTimeout(900);
+
+            if (expectedText) {
+              const expectedLocator = page.getByText(new RegExp(escapeRegex(expectedText), "i")).first();
+              await expectedLocator.waitFor({ state: "visible", timeout: 15000 });
+              await expectedLocator.scrollIntoViewIfNeeded();
+              await page.waitForTimeout(900);
+            }
+
+            await page.mouse.move(220, 140);
+            await page.waitForTimeout(300);
+            await page.evaluate(() => window.scrollTo({ top: 420, behavior: "smooth" }));
+            await page.waitForTimeout(1000);
+            await page.evaluate(() => window.scrollTo({ top: 980, behavior: "smooth" }));
+            await page.waitForTimeout(1000);
+            await page.evaluate(() => window.scrollTo({ top: 0, behavior: "smooth" }));
+            await page.waitForTimeout(900);
+
+            const nodes = await page.locator("a,button").elementHandles();
+            for (const node of nodes.slice(0, 6)) {
+              const box = await node.boundingBox();
+              if (!box) continue;
+              await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+              await page.waitForTimeout(240);
+            }
+            await page.waitForTimeout(1200);
+
+            const video = page.video();
+            await context.close();
+            await browser.close();
+            if (!video) throw new Error("No video captured");
+            const captured = await video.path();
+            fs.copyFileSync(captured, outWebm);
+
+            const size = fs.statSync(outWebm).size;
+            if (size < 120000) {
+              throw new Error(`Captured UI video was unexpectedly small (${size} bytes).`);
+            }
+          })().catch((error) => {
+            console.error(error);
+            process.exit(1);
+          });
+          NODE
 
       - name: Ensure ffmpeg is available
         shell: bash
@@ -68,40 +249,28 @@ jobs:
             sudo apt-get install -y ffmpeg
           fi
 
-      - name: Build demo frame text files
+      - name: Convert demo to mp4
         shell: bash
         run: |
-          printf '%s\n' "${{ steps.meta.outputs.line_repo }}" > line_repo.txt
-          printf '%s\n' "${{ steps.meta.outputs.line_status }}" > line_status.txt
-          printf '%s\n' "${{ steps.meta.outputs.line_title }}" > line_title.txt
-          printf '%s\n' "${{ steps.meta.outputs.line_author }}" > line_author.txt
-          printf '%s\n' "${{ steps.meta.outputs.line_stats }}" > line_stats.txt
-          printf '%s\n' "${{ steps.meta.outputs.line_url }}" > line_url.txt
+          ffmpeg -y -i pr-demo.webm -c:v libx264 -pix_fmt yuv420p -movflags +faststart pr-demo.mp4
 
-      - name: Render mp4 demo
+      - name: Stop dev server
+        if: always()
         shell: bash
         run: |
-          ffmpeg -y \
-            -f lavfi -i color=c=0x05060b:s=1280x720:d=8 \
-            -vf "
-              drawbox=x=64:y=72:w=1152:h=576:color=0x0c1019@1:t=fill,
-              drawbox=x=64:y=72:w=1152:h=576:color=0x2b3347@0.8:t=2,
-              drawbox=x=64:y=72:w=1152:h=6:color=0xea580c@1:t=fill,
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf:text='MERGED PR DEMO PREVIEW':fontcolor=0xffffff@0.78:fontsize=28:x=96:y=104,
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:textfile=line_repo.txt:fontcolor=0xffffff@0.9:fontsize=46:x=96:y=178,
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:textfile=line_status.txt:fontcolor=0xf97316@1:fontsize=40:x=96:y=246,
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:textfile=line_title.txt:fontcolor=0xffffff@0.95:fontsize=40:x=96:y=316,
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:textfile=line_author.txt:fontcolor=0xffffff@0.72:fontsize=34:x=96:y=384,
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf:textfile=line_stats.txt:fontcolor=0xffffff@0.62:fontsize=30:x=96:y=448,
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf:text='Auto-generated by Blastgit. No contributor action required.':fontcolor=0xffffff@0.56:fontsize=24:x=96:y=520,
-              drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf:textfile=line_url.txt:fontcolor=0xffffff@0.44:fontsize=20:x=96:y=560
-            " \
-            -c:v libx264 -pix_fmt yuv420p -profile:v main -level 4.0 -r 30 \
-            -movflags +faststart \
-            pr-demo.mp4
+          if [ -f /tmp/blastgit-demo-server.pid ]; then
+            kill "$(cat /tmp/blastgit-demo-server.pid)" >/dev/null 2>&1 || true
+          fi
+
+      - name: Upload server log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: blastgit-pr-demo-server-log
+          path: /tmp/blastgit-demo-server.log
 
       - name: Upload demo artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: blastgit-pr-demo-video
           path: pr-demo.mp4
