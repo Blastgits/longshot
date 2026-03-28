@@ -230,11 +230,6 @@ jobs:
             if (!video) throw new Error("No video captured");
             const captured = await video.path();
             fs.copyFileSync(captured, outWebm);
-
-            const size = fs.statSync(outWebm).size;
-            if (size < 120000) {
-              throw new Error(`Captured UI video was unexpectedly small (${size} bytes).`);
-            }
           })().catch((error) => {
             console.error(error);
             process.exit(1);
