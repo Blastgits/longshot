@@ -236,9 +236,13 @@ jobs:
 
             if (expectedText) {
               const expectedLocator = page.getByText(new RegExp(escapeRegex(expectedText), "i")).first();
-              await expectedLocator.waitFor({ state: "visible", timeout: 15000 });
-              await expectedLocator.scrollIntoViewIfNeeded();
-              await page.waitForTimeout(900);
+              try {
+                await expectedLocator.waitFor({ state: "visible", timeout: 15000 });
+                await expectedLocator.scrollIntoViewIfNeeded();
+                await page.waitForTimeout(900);
+              } catch {
+                console.warn(`Expected text not visible in capture: "${expectedText}"`);
+              }
             }
 
             await page.mouse.move(220, 140);
