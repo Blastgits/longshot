@@ -39,14 +39,44 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            const prNumberInput = core.getInput('pr_number');
-            const prNumber = context.payload.pull_request?.number ?? (prNumberInput ? Number(prNumberInput) : null);
+            const { owner, repo } = context.repo;
+            const rawPrInput = String(core.getInput('pr_number') || context.payload.inputs?.pr_number || '').trim();
+            const parsedInput = rawPrInput ? Number(rawPrInput) : null;
+            let prNumber = context.payload.pull_request?.number ?? (Number.isFinite(parsedInput) && parsedInput > 0 ? parsedInput : null);
+
+            if (!prNumber && context.sha) {
+              const { data: associatedPulls } = await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                owner,
+                repo,
+                commit_sha: context.sha,
+              });
+              const openAssociated = associatedPulls.find((pull) => pull.state === 'open') ?? associatedPulls[0];
+              if (openAssociated?.number) {
+                prNumber = openAssociated.number;
+              }
+            }
+
+            if (!prNumber) {
+              const refName = String(context.ref || '').replace('refs/heads/', '').trim();
+              if (refName) {
+                const { data: refPulls } = await github.rest.pulls.list({
+                  owner,
+                  repo,
+                  state: 'open',
+                  head: `${owner}:${refName}`,
+                  per_page: 1,
+                });
+                if (refPulls[0]?.number) {
+                  prNumber = refPulls[0].number;
+                }
+              }
+            }
+
             if (!prNumber || Number.isNaN(prNumber)) {
-              core.setFailed('Missing pull request number');
+              core.setFailed('Missing pull request number (event, workflow input, and SHA association all failed)');
               return;
             }
 
-            const { owner, repo } = context.repo;
             const { data: pr } = await github.rest.pulls.get({
               owner,
               repo,
@@ -93,11 +123,17 @@ jobs:
               return out;
             }
 
-            const landingTouched = files.some((f) => f.filename.startsWith('landing/'));
+            const landingFiles = files.filter((f) => f.filename.startsWith('landing/'));
+            const landingTouched = landingFiles.length > 0;
+            if (!landingTouched) {
+              core.setFailed('No landing/ UI changes in this PR; refusing to generate a non-targeted demo');
+              return;
+            }
+
             const demoPath = '/';
             const demoSelector = '.hero__headline, .hero, h1';
 
-            const prioritizedFiles = landingTouched ? files.filter((f) => f.filename.startsWith('landing/')) : files;
+            const prioritizedFiles = landingFiles;
             const candidates = [];
             for (const file of prioritizedFiles) {
               for (const candidate of extractCandidatesFromPatch(file.patch)) {
