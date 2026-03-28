@@ -1,4 +1,5 @@
 name: Blastgit PR Demo
+run-name: Blastgit PR Demo #${{ github.event.pull_request.number || inputs.pr_number || 'unknown' }}
 
 on:
   pull_request:
@@ -306,6 +307,6 @@ jobs:
       - name: Upload demo artifact
         uses: actions/upload-artifact@v7
         with:
-          name: blastgit-pr-demo-video
+          name: blastgit-pr-demo-video-pr-${{ steps.meta.outputs.pr_number }}
           path: pr-demo.mp4
           retention-days: 30
