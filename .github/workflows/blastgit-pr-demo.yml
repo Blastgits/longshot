@@ -126,8 +126,10 @@ jobs:
 
             const landingFiles = files.filter((f) => f.filename.startsWith('landing/'));
             const landingTouched = landingFiles.length > 0;
+            let demoEnabled = true;
             if (!landingTouched) {
-              core.warning('No landing/ UI changes in this PR; using homepage fallback for real UI capture');
+              demoEnabled = false;
+              core.warning('No landing/ UI changes in this PR; skipping demo generation');
             }
 
             const demoPath = '/';
@@ -150,14 +152,26 @@ jobs:
             });
 
             const expectedText = uniqueCandidates[0] || '';
+            if (!expectedText) {
+              demoEnabled = false;
+              core.warning('No targetable UI text extracted from this PR; skipping demo generation');
+            }
 
             core.setOutput('pr_number', String(prNumber));
             core.setOutput('pr_title', String(pr.title || ''));
             core.setOutput('demo_path', demoPath);
             core.setOutput('demo_selector', demoSelector);
             core.setOutput('expected_text', expectedText);
+            core.setOutput('demo_enabled', demoEnabled ? 'true' : 'false');
+
+      - name: Skip non-targetable PR demo
+        if: steps.meta.outputs.demo_enabled != 'true'
+        shell: bash
+        run: |
+          echo "Skipping PR demo: no targetable landing UI change was detected."
 
       - name: Install landing dependencies
+        if: steps.meta.outputs.demo_enabled == 'true'
         working-directory: landing
         shell: bash
         run: |
@@ -165,12 +179,14 @@ jobs:
           npm install --no-save playwright
 
       - name: Install browser dependencies
+        if: steps.meta.outputs.demo_enabled == 'true'
         working-directory: landing
         shell: bash
         run: |
           npx playwright install --with-deps chromium
 
       - name: Start landing dev server
+        if: steps.meta.outputs.demo_enabled == 'true'
         working-directory: landing
         shell: bash
         run: |
@@ -178,6 +194,7 @@ jobs:
           echo $! > /tmp/blastgit-demo-server.pid
 
       - name: Wait for app
+        if: steps.meta.outputs.demo_enabled == 'true'
         shell: bash
         run: |
           for i in $(seq 1 90); do
@@ -191,6 +208,7 @@ jobs:
           exit 1
 
       - name: Capture real UI demo (strict)
+        if: steps.meta.outputs.demo_enabled == 'true'
         working-directory: landing
         env:
           DEMO_URL: http://127.0.0.1:4173/
@@ -235,16 +253,13 @@ jobs:
             }
             await page.waitForTimeout(900);
 
-            if (expectedText) {
-              const expectedLocator = page.getByText(new RegExp(escapeRegex(expectedText), "i")).first();
-              try {
-                await expectedLocator.waitFor({ state: "visible", timeout: 15000 });
-                await expectedLocator.scrollIntoViewIfNeeded();
-                await page.waitForTimeout(900);
-              } catch {
-                console.warn(`Expected text not visible in capture: "${expectedText}"`);
-              }
+            if (!expectedText) {
+              throw new Error("Missing required expected text target for PR demo capture");
             }
+            const expectedLocator = page.getByText(new RegExp(escapeRegex(expectedText), "i")).first();
+            await expectedLocator.waitFor({ state: "visible", timeout: 15000 });
+            await expectedLocator.scrollIntoViewIfNeeded();
+            await page.waitForTimeout(900);
 
             await page.mouse.move(220, 140);
             await page.waitForTimeout(300);
@@ -277,6 +292,7 @@ jobs:
           NODE
 
       - name: Ensure ffmpeg is available
+        if: steps.meta.outputs.demo_enabled == 'true'
         shell: bash
         run: |
           if ! command -v ffmpeg >/dev/null 2>&1; then
@@ -285,12 +301,35 @@ jobs:
           fi
 
       - name: Convert demo to mp4
+        if: steps.meta.outputs.demo_enabled == 'true'
         shell: bash
         run: |
           ffmpeg -y -i pr-demo.webm -c:v libx264 -pix_fmt yuv420p -movflags +faststart pr-demo.mp4
 
+      - name: Write demo metadata
+        if: steps.meta.outputs.demo_enabled == 'true'
+        shell: bash
+        env:
+          PR_NUMBER: ${{ steps.meta.outputs.pr_number }}
+          EXPECTED_TEXT: ${{ steps.meta.outputs.expected_text }}
+          DEMO_PATH: ${{ steps.meta.outputs.demo_path }}
+          DEMO_SELECTOR: ${{ steps.meta.outputs.demo_selector }}
+        run: |
+          node <<'NODE'
+          const fs = require("node:fs");
+          const path = "pr-demo-meta.json";
+          const metadata = {
+            prNumber: Number(process.env.PR_NUMBER || "0"),
+            expectedText: String(process.env.EXPECTED_TEXT || ""),
+            demoPath: String(process.env.DEMO_PATH || ""),
+            demoSelector: String(process.env.DEMO_SELECTOR || ""),
+            generatedAt: new Date().toISOString(),
+          };
+          fs.writeFileSync(path, JSON.stringify(metadata, null, 2));
+          NODE
+
       - name: Stop dev server
-        if: always()
+        if: always() && steps.meta.outputs.demo_enabled == 'true'
         shell: bash
         run: |
           if [ -f /tmp/blastgit-demo-server.pid ]; then
@@ -305,8 +344,11 @@ jobs:
           path: /tmp/blastgit-demo-server.log
 
       - name: Upload demo artifact
+        if: steps.meta.outputs.demo_enabled == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: blastgit-pr-demo-video-pr-${{ steps.meta.outputs.pr_number }}
-          path: pr-demo.mp4
+          path: |
+            pr-demo.mp4
+            pr-demo-meta.json
           retention-days: 30
