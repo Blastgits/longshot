@@ -37,7 +37,7 @@ jobs:
 
       - name: Resolve PR metadata and demo target
         id: meta
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const { owner, repo } = context.repo;
