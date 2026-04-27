@@ -13,8 +13,8 @@
   },
   "dependencies": {
     "@longshot/core": "workspace:*",
-    "@mariozechner/pi-coding-agent": "^0.55.3",
-    "dotenv": "^17.3.1"
+    "@mariozechner/pi-coding-agent": "^0.70.2",
+    "dotenv": "^17.4.2"
   },
   "devDependencies": {
     "@types/node": "^25.3.5",

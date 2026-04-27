@@ -13,7 +13,7 @@
   },
   "dependencies": {
     "@longshot/core": "workspace:*",
-    "@mariozechner/pi-coding-agent": "^0.55.3"
+    "@mariozechner/pi-coding-agent": "^0.70.2"
   },
   "devDependencies": {
     "@types/node": "^25.3.5",

@@ -28,9 +28,9 @@
   },
   "packageManager": "pnpm@9.0.0",
   "dependencies": {
-    "@browserbasehq/stagehand": "^3.1.0",
+    "@browserbasehq/stagehand": "^3.2.1",
     "@longshot/core": "workspace:*",
-    "@modelcontextprotocol/sdk": "^1.27.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "zod": "^4.3.6"
   },
   "lint-staged": {
